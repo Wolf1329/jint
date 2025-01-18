@@ -1,9 +1,8 @@
-﻿namespace Jint
+namespace Jint;
+
+public enum DeclarationBindingType
 {
-    public enum DeclarationBindingType
-    {
-        GlobalCode,
-        FunctionCode,
-        EvalCode
-    }
+    GlobalCode,
+    FunctionCode,
+    EvalCode
 }

@@ -1,37 +1,74 @@
-using Esprima.Ast;
-using Jint.Native;
 using Jint.Native.Function;
 
-namespace Jint.Runtime.Interpreter.Expressions
+namespace Jint.Runtime.Interpreter.Expressions;
+
+internal sealed class JintArrowFunctionExpression : JintExpression
 {
-    internal sealed class JintArrowFunctionExpression : JintExpression
+    private readonly JintFunctionDefinition _function;
+
+    public JintArrowFunctionExpression(ArrowFunctionExpression function) : base(function)
     {
-        private readonly JintFunctionDefinition _function;
+        _function = new JintFunctionDefinition(function);
+    }
 
-        public JintArrowFunctionExpression(Engine engine, ArrowFunctionExpression function)
-            : base(ArrowParameterPlaceHolder.Empty)
-        {
-            _function = new JintFunctionDefinition(engine, function);
-        }
+    protected override object EvaluateInternal(EvaluationContext context)
+    {
+        return Build(context.Engine, _function);
+    }
 
-        protected override ExpressionResult EvaluateInternal(EvaluationContext context)
-        {
-            var engine = context.Engine;
-            var scope = engine.ExecutionContext.LexicalEnvironment;
+    private static ScriptFunction Build(Engine engine, JintFunctionDefinition function)
+    {
+        var functionName = function.Name ?? "";
+        var closure = function.Function.Async
+            ? InstantiateAsyncArrowFunctionExpression(engine, function, functionName)
+            : InstantiateArrowFunctionExpression(engine, function, functionName);
 
-            var closure = new ScriptFunctionInstance(
-                engine,
-                _function,
-                scope,
-                FunctionThisMode.Lexical,
-                proto: engine.Realm.Intrinsics.Function.PrototypeObject);
+        return closure;
+    }
 
-            if (_function.Name is null)
-            {
-                closure.SetFunctionName(JsString.Empty);
-            }
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-runtime-semantics-instantiatearrowfunctionexpression
+    /// </summary>
+    private static ScriptFunction InstantiateArrowFunctionExpression(Engine engine, JintFunctionDefinition function, string name)
+    {
+        var runningExecutionContext = engine.ExecutionContext;
+        var env = runningExecutionContext.LexicalEnvironment;
+        var privateEnv = runningExecutionContext.PrivateEnvironment;
 
-            return NormalCompletion(closure);
-        }
+        var intrinsics = engine.Realm.Intrinsics;
+        var closure = intrinsics.Function.OrdinaryFunctionCreate(
+            intrinsics.Function.PrototypeObject,
+            function,
+            FunctionThisMode.Lexical,
+            env,
+            privateEnv
+        );
+
+        closure.SetFunctionName(name);
+
+        return closure;
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-runtime-semantics-instantiateasyncarrowfunctionexpression
+    /// </summary>
+    private static ScriptFunction InstantiateAsyncArrowFunctionExpression(Engine engine, JintFunctionDefinition function, string name)
+    {
+        var executionContext = engine.ExecutionContext;
+        var env = executionContext.LexicalEnvironment;
+        var privateEnv = executionContext.PrivateEnvironment;
+
+        var intrinsics = engine.Realm.Intrinsics;
+        var closure = intrinsics.Function.OrdinaryFunctionCreate(
+            intrinsics.AsyncFunction.PrototypeObject,
+            function,
+            FunctionThisMode.Lexical,
+            env,
+            privateEnv
+        );
+
+        closure.SetFunctionName(name);
+
+        return closure;
     }
 }

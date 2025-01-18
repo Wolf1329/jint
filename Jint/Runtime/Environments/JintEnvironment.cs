@@ -1,132 +1,125 @@
-﻿#nullable enable
-
+﻿using System.Diagnostics.CodeAnalysis;
 using Jint.Native;
 using Jint.Native.Function;
 using Jint.Native.Object;
 
-namespace Jint.Runtime.Environments
+namespace Jint.Runtime.Environments;
+
+internal static class JintEnvironment
 {
-    internal static class JintEnvironment
+    internal static bool TryGetIdentifierEnvironmentWithBinding(
+        Environment env,
+        Environment.BindingName name,
+        [NotNullWhen(true)] out Environment? record)
     {
-        internal static bool TryGetIdentifierEnvironmentWithBinding(
-            EnvironmentRecord env,
-            in EnvironmentRecord.BindingName name,
-            out EnvironmentRecord? record)
-        {
-            record = env;
+        record = env;
 
-            var keyName = name.Key.Name;
-            if (env._outerEnv is null)
+        if (env._outerEnv is null)
+        {
+            return env.HasBinding(name);
+        }
+
+        while (record is not null)
+        {
+            if (record.HasBinding(name))
             {
-                return env.HasBinding(keyName);
+                return true;
             }
 
-            while (!ReferenceEquals(record, null))
-            {
-                if (record.HasBinding(keyName))
-                {
-                    return true;
-                }
+            record = record._outerEnv;
+        }
 
-                record = record._outerEnv;
+        return false;
+    }
+
+    internal static bool TryGetIdentifierEnvironmentWithBindingValue(
+        Environment env,
+        Environment.BindingName name,
+        bool strict,
+        [NotNullWhen(true)] out Environment? record,
+        [NotNullWhen(true)] out JsValue? value)
+    {
+        record = env;
+        value = default;
+
+        if (env._outerEnv is null)
+        {
+            return ((GlobalEnvironment) env).TryGetBinding(name, strict, out value);
+        }
+
+        while (record is not null)
+        {
+            if (record.TryGetBinding(name, strict, out value))
+            {
+                return true;
             }
 
-            return false;
+            record = record._outerEnv;
         }
 
-        internal static bool TryGetIdentifierEnvironmentWithBindingValue(
-            EnvironmentRecord env,
-            in EnvironmentRecord.BindingName name,
-            bool strict,
-            out EnvironmentRecord? record,
-            out JsValue? value)
+        return false;
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-newdeclarativeenvironment
+    /// </summary>
+    internal static DeclarativeEnvironment NewDeclarativeEnvironment(Engine engine, Environment? outer, bool catchEnvironment = false)
+    {
+        return new DeclarativeEnvironment(engine, catchEnvironment)
         {
-            record = env;
-            value = default;
+            _outerEnv = outer
+        };
+    }
 
-            if (env._outerEnv is null)
-            {
-                return env.TryGetBinding(name, strict, out _, out value);
-            }
-
-            while (!ReferenceEquals(record, null))
-            {
-                if (record.TryGetBinding(
-                    name,
-                    strict,
-                    out _,
-                    out value))
-                {
-                    return true;
-                }
-
-                record = record._outerEnv;
-            }
-
-            return false;
-        }
-
-        /// <summary>
-        /// https://tc39.es/ecma262/#sec-newdeclarativeenvironment
-        /// </summary>
-        internal static DeclarativeEnvironmentRecord NewDeclarativeEnvironment(Engine engine, EnvironmentRecord outer, bool catchEnvironment = false)
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-newfunctionenvironment
+    /// </summary>
+    internal static FunctionEnvironment NewFunctionEnvironment(Engine engine, Function f, JsValue newTarget)
+    {
+        return new FunctionEnvironment(engine, f, newTarget)
         {
-            return new DeclarativeEnvironmentRecord(engine, catchEnvironment)
-            {
-                _outerEnv = outer
-            };
-        }
+            _outerEnv = f._environment
+        };
+    }
 
-        /// <summary>
-        /// https://tc39.es/ecma262/#sec-newfunctionenvironment
-        /// </summary>
-        internal static FunctionEnvironmentRecord NewFunctionEnvironment(Engine engine, FunctionInstance f, JsValue newTarget)
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-newglobalenvironment
+    /// </summary>
+    internal static GlobalEnvironment NewGlobalEnvironment(Engine engine, ObjectInstance objectInstance, JsValue thisValue)
+    {
+        return new GlobalEnvironment(engine, objectInstance)
         {
-            return new FunctionEnvironmentRecord(engine, f, newTarget)
-            {
-                _outerEnv = f._environment
-            };
-        }
+            _outerEnv = null
+        };
+    }
 
-        /// <summary>
-        /// https://tc39.es/ecma262/#sec-newglobalenvironment
-        /// </summary>
-        internal static GlobalEnvironmentRecord NewGlobalEnvironment(Engine engine, ObjectInstance objectInstance, JsValue thisValue)
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-newobjectenvironment
+    /// </summary>
+    internal static ObjectEnvironment NewObjectEnvironment(Engine engine, ObjectInstance objectInstance, Environment outer, bool provideThis, bool withEnvironment = false)
+    {
+        return new ObjectEnvironment(engine, objectInstance, provideThis, withEnvironment)
         {
-            return new GlobalEnvironmentRecord(engine, objectInstance)
-            {
-                _outerEnv = null
-            };
-        }
+            _outerEnv = outer
+        };
+    }
 
-        /// <summary>
-        /// https://tc39.es/ecma262/#sec-newobjectenvironment
-        /// </summary>
-        internal static ObjectEnvironmentRecord NewObjectEnvironment(Engine engine, ObjectInstance objectInstance, EnvironmentRecord outer, bool provideThis, bool withEnvironment = false)
-        {
-            return new ObjectEnvironmentRecord(engine, objectInstance, provideThis, withEnvironment)
-            {
-                _outerEnv = outer
-            };
-        }
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-newprivateenvironment
+    /// </summary>
+    internal static PrivateEnvironment NewPrivateEnvironment(Engine engine, PrivateEnvironment? outerPriv)
+    {
+        return new PrivateEnvironment(outerPriv);
+    }
 
-        /// <summary>
-        /// https://tc39.es/ecma262/#sec-newprivateenvironment
-        /// </summary>
-        internal static PrivateEnvironmentRecord NewPrivateEnvironment(Engine engine, PrivateEnvironmentRecord? outerPriv)
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-newmoduleenvironment
+    /// </summary>
+    internal static ModuleEnvironment NewModuleEnvironment(Engine engine, Environment outer)
+    {
+        return new ModuleEnvironment(engine)
         {
-            return new PrivateEnvironmentRecord(outerPriv);
-        }
-
-        /// <summary>
-        /// https://tc39.es/ecma262/#sec-newmoduleenvironment
-        /// </summary>
-        internal static ModuleEnvironmentRecord NewModuleEnvironment(Engine engine, EnvironmentRecord outer)
-        {
-            return new ModuleEnvironmentRecord(engine)
-            {
-                _outerEnv = outer
-            };
-        }
+            _outerEnv = outer
+        };
     }
 }

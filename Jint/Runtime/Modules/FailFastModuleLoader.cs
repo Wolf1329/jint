@@ -1,15 +1,12 @@
-#nullable enable
-
-using System;
-using Esprima.Ast;
-
 namespace Jint.Runtime.Modules;
 
 internal sealed class FailFastModuleLoader : IModuleLoader
 {
     public static readonly IModuleLoader Instance = new FailFastModuleLoader();
 
+#pragma warning disable CA1822
     public Uri BasePath
+#pragma warning restore CA1822
     {
         get
         {
@@ -18,9 +15,9 @@ internal sealed class FailFastModuleLoader : IModuleLoader
         }
     }
 
-    public ResolvedSpecifier Resolve(string? referencingModuleLocation, string specifier)
+    public ResolvedSpecifier Resolve(string? referencingModuleLocation, ModuleRequest moduleRequest)
     {
-        return new ResolvedSpecifier(specifier, specifier, null, SpecifierType.Bare);
+        return new ResolvedSpecifier(moduleRequest, moduleRequest.Specifier, Uri: null, SpecifierType.Bare);
     }
 
     public Module LoadModule(Engine engine, ResolvedSpecifier resolved)

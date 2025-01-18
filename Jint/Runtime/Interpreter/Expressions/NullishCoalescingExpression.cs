@@ -1,50 +1,48 @@
 using System.Runtime.CompilerServices;
-using Esprima.Ast;
 using Jint.Native;
 
-namespace Jint.Runtime.Interpreter.Expressions
+namespace Jint.Runtime.Interpreter.Expressions;
+
+internal sealed class NullishCoalescingExpression : JintExpression
 {
-    internal sealed class NullishCoalescingExpression : JintExpression
+    private readonly JintExpression _left;
+    private readonly JintExpression? _right;
+    private readonly JsValue? _constant;
+
+    public NullishCoalescingExpression(LogicalExpression expression) : base(expression)
     {
-        private readonly JintExpression _left;
-        private readonly JintExpression _right;
-        private readonly JsValue _constant;
+        _left = Build(expression.Left);
 
-        public NullishCoalescingExpression(Engine engine, BinaryExpression expression) : base(expression)
+        // we can create a fast path for common literal case like variable ?? 0
+        if (expression.Right is Literal l)
         {
-            _left = Build(engine, expression.Left);
-
-            // we can create a fast path for common literal case like variable ?? 0
-            if (expression.Right is Literal l)
-            {
-                _constant = JintLiteralExpression.ConvertToJsValue(l);
-            }
-            else
-            {
-                _right = Build(engine, expression.Right);
-            }
+            _constant = JintLiteralExpression.ConvertToJsValue(l);
         }
-
-        public override Completion GetValue(EvaluationContext context)
+        else
         {
-            // need to notify correct node when taking shortcut
-            context.LastSyntaxNode = _expression;
-            return Completion.Normal(EvaluateConstantOrExpression(context), _expression.Location);
+            _right = Build(expression.Right);
         }
+    }
 
-        protected override ExpressionResult EvaluateInternal(EvaluationContext context)
-        {
-            return NormalCompletion(EvaluateConstantOrExpression(context));
-        }
+    public override JsValue GetValue(EvaluationContext context)
+    {
+        // need to notify correct node when taking shortcut
+        context.LastSyntaxElement = _expression;
+        return EvaluateConstantOrExpression(context);
+    }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private JsValue EvaluateConstantOrExpression(EvaluationContext context)
-        {
-            var left = _left.GetValue(context).Value;
+    protected override object EvaluateInternal(EvaluationContext context)
+    {
+        return EvaluateConstantOrExpression(context);
+    }
 
-            return !left.IsNullOrUndefined()
-                ? left
-                : _constant ?? _right.GetValue(context).Value;
-        }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private JsValue EvaluateConstantOrExpression(EvaluationContext context)
+    {
+        var left = _left.GetValue(context);
+
+        return !left.IsNullOrUndefined()
+            ? left
+            : _constant ?? _right!.GetValue(context);
     }
 }

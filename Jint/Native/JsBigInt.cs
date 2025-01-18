@@ -1,4 +1,3 @@
-using System;
 using System.Numerics;
 using Jint.Runtime;
 
@@ -20,6 +19,7 @@ public sealed class JsBigInt : JsValue, IEquatable<JsBigInt>
         {
             bigIntegers[i] = new JsBigInt(i);
         }
+
         _bigIntegerToJsValue = bigIntegers;
     }
 
@@ -41,20 +41,16 @@ public sealed class JsBigInt : JsValue, IEquatable<JsBigInt>
 
     internal static JsBigInt Create(JsValue value)
     {
-        return value is JsBigInt jsBigInt
-            ? jsBigInt
-            : Create(TypeConverter.ToBigInt(value));
+        return value as JsBigInt ?? Create(TypeConverter.ToBigInt(value));
     }
 
+    public override object ToObject() => _value;
 
-    public override object ToObject()
-    {
-        return _value;
-    }
+    internal override bool ToBoolean() => _value != 0;
 
     public static bool operator ==(JsBigInt a, double b)
     {
-        return a is not null && TypeConverter.IsIntegralNumber(b) && a._value == (long) b;
+        return TypeConverter.IsIntegralNumber(b) && a._value == (long) b;
     }
 
     public static bool operator !=(JsBigInt a, double b)
@@ -67,7 +63,7 @@ public sealed class JsBigInt : JsValue, IEquatable<JsBigInt>
         return TypeConverter.ToString(_value);
     }
 
-    public override bool IsLooselyEqual(JsValue value)
+    protected internal override bool IsLooselyEqual(JsValue value)
     {
         if (value is JsBigInt bigInt)
         {
@@ -97,28 +93,19 @@ public sealed class JsBigInt : JsValue, IEquatable<JsBigInt>
         return false;
     }
 
-    public override bool Equals(object other)
-    {
-        return Equals(other as JsBigInt);
-    }
+    public override bool Equals(object? obj) => Equals(obj as JsBigInt);
 
-    public override bool Equals(JsValue other)
-    {
-        return Equals(other as JsBigInt);
-    }
+    public override bool Equals(JsValue? other) => Equals(other as JsBigInt);
 
-    public bool Equals(JsBigInt other)
+    public bool Equals(JsBigInt? other)
     {
         if (ReferenceEquals(null, other))
         {
             return false;
         }
 
-        return ReferenceEquals(this, other) || _value.Equals(other._value);
+        return ReferenceEquals(this, other) || _value == other._value;
     }
 
-    public override int GetHashCode()
-    {
-        return _value.GetHashCode();
-    }
+    public override int GetHashCode() => _value.GetHashCode();
 }

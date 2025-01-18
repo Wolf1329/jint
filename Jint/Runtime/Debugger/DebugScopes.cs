@@ -1,122 +1,79 @@
-﻿using Jint.Runtime.Environments;
+using Jint.Runtime.Environments;
 using System.Collections;
-using System.Collections.Generic;
+using Environment = Jint.Runtime.Environments.Environment;
 
-namespace Jint.Runtime.Debugger
+namespace Jint.Runtime.Debugger;
+
+public sealed class DebugScopes : IReadOnlyList<DebugScope>
 {
-    public sealed class DebugScopes : IReadOnlyList<DebugScope>
+    private readonly List<DebugScope> _scopes = new();
+
+    internal DebugScopes(Environment environment)
     {
-        private readonly HashSet<string> _foundBindings = new HashSet<string>();
-        private readonly List<DebugScope> _scopes = new List<DebugScope>();
+        Populate(environment);
+    }
 
-        internal DebugScopes(EnvironmentRecord environment)
+    public DebugScope this[int index] => _scopes[index];
+    public int Count => _scopes.Count;
+
+    private void Populate(Environment? environment)
+    {
+        bool inLocalScope = true;
+        while (environment is not null)
         {
-            Populate(environment);
-        }
-
-        /// <summary>
-        /// Shortcut to Global scope.
-        /// </summary>
-        /// <remarks>
-        /// Note that this only includes the object environment record of the Global scope - i.e. it doesn't
-        /// include block scope bindings (let/const).
-        /// </remarks>
-        public DebugScope Global { get; private set; }
-
-        /// <summary>
-        /// Shortcut to Local scope.
-        /// </summary>
-        /// <remarks>
-        /// Note that this is only present inside functions, and doesn't include block scope bindings (let/const)
-        /// </remarks>
-        public DebugScope Local { get; private set; }
-
-        public DebugScope this[int index] => _scopes[index];
-        public int Count => _scopes.Count;
-
-        private void Populate(EnvironmentRecord environment)
-        {
-            bool inLocalScope = true;
-            while (environment != null)
+            var record = environment;
+            switch (record)
             {
-                EnvironmentRecord record = environment;
-                switch (record)
-                {
-                    case GlobalEnvironmentRecord global:
-                        // Similarly to Chromium, we split the Global environment into Global and Script scopes
-                        AddScope(DebugScopeType.Script, global._declarativeRecord);
-                        AddScope(DebugScopeType.Global, global._objectRecord);
-                        break;
-                    case FunctionEnvironmentRecord:
-                        AddScope(inLocalScope ? DebugScopeType.Local : DebugScopeType.Closure, record);
-                        // We're now in closure territory
-                        inLocalScope = false;
-                        break;
-                    case ObjectEnvironmentRecord:
-                        // If an ObjectEnvironmentRecord is not a GlobalEnvironmentRecord, it's With
-                        AddScope(DebugScopeType.With, record);
-                        break;
-                    case DeclarativeEnvironmentRecord der:
-                        if (der._catchEnvironment)
-                        {
-                            AddScope(DebugScopeType.Catch, record);
-                        }
-                        else
-                        {
-                            bool isTopLevel = environment._outerEnv is FunctionEnvironmentRecord;
-                            AddScope(DebugScopeType.Block, record, isTopLevel: isTopLevel);
-                        }
-                        break;
-                }
-
-                environment = environment._outerEnv;
+                case GlobalEnvironment global:
+                    // Similarly to Chromium, we split the Global environment into Global and Script scopes
+                    AddScope(DebugScopeType.Script, global._declarativeRecord);
+                    AddScope(DebugScopeType.Global, new ObjectEnvironment(environment._engine, global._global, false, false));
+                    break;
+                case FunctionEnvironment:
+                    AddScope(inLocalScope ? DebugScopeType.Local : DebugScopeType.Closure, record);
+                    // We're now in closure territory
+                    inLocalScope = false;
+                    break;
+                case ObjectEnvironment:
+                    // If an ObjectEnvironmentRecord is not a GlobalEnvironmentRecord, it's With
+                    AddScope(DebugScopeType.With, record);
+                    break;
+                case ModuleEnvironment:
+                    AddScope(DebugScopeType.Module, record);
+                    break;
+                case DeclarativeEnvironment der:
+                    if (der._catchEnvironment)
+                    {
+                        AddScope(DebugScopeType.Catch, record);
+                    }
+                    else
+                    {
+                        bool isTopLevel = environment._outerEnv is FunctionEnvironment;
+                        AddScope(DebugScopeType.Block, record, isTopLevel: isTopLevel);
+                    }
+                    break;
             }
-        }
 
-        private void AddScope(DebugScopeType type, EnvironmentRecord record, bool isTopLevel = false)
+            environment = environment._outerEnv;
+        }
+    }
+
+    private void AddScope(DebugScopeType type, Environment record, bool isTopLevel = false)
+    {
+        if (record.HasBindings())
         {
-            var bindings = new List<string>();
-            PopulateBindings(bindings, record);
-
-            if (bindings.Count > 0)
-            {
-                var scope = new DebugScope(type, record, bindings, isTopLevel);
-                _scopes.Add(scope);
-                switch (type)
-                {
-                    case DebugScopeType.Global:
-                        Global = scope;
-                        break;
-                    case DebugScopeType.Local:
-                        Local = scope;
-                        break;
-                }
-            }
+            var scope = new DebugScope(type, record, isTopLevel);
+            _scopes.Add(scope);
         }
+    }
 
-        private void PopulateBindings(List<string> bindings, EnvironmentRecord record)
-        {
-            var bindingNames = record.GetAllBindingNames();
+    public IEnumerator<DebugScope> GetEnumerator()
+    {
+        return _scopes.GetEnumerator();
+    }
 
-            foreach (var name in bindingNames)
-            {
-                // Only add non-shadowed bindings
-                if (!_foundBindings.Contains(name))
-                {
-                    bindings.Add(name);
-                    _foundBindings.Add(name);
-                }
-            }
-        }
-
-        public IEnumerator<DebugScope> GetEnumerator()
-        {
-            return _scopes.GetEnumerator();
-        }
-
-        IEnumerator IEnumerable.GetEnumerator()
-        {
-            return _scopes.GetEnumerator();
-        }
+    IEnumerator IEnumerable.GetEnumerator()
+    {
+        return _scopes.GetEnumerator();
     }
 }

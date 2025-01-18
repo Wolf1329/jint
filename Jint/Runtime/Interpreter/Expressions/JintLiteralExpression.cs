@@ -1,81 +1,80 @@
-using System;
-using System.Numerics;
-using Esprima;
-using Esprima.Ast;
+using System.Text.RegularExpressions;
 using Jint.Native;
 
-namespace Jint.Runtime.Interpreter.Expressions
+namespace Jint.Runtime.Interpreter.Expressions;
+
+internal sealed class JintLiteralExpression : JintExpression
 {
-    internal sealed class JintLiteralExpression : JintExpression
+    private static readonly object _nullMarker = new();
+
+    private JintLiteralExpression(Literal expression) : base(expression)
     {
-        private JintLiteralExpression(Literal expression) : base(expression)
+    }
+
+    internal static JintExpression Build(Literal expression)
+    {
+        var value = expression.UserData ??= ConvertToJsValue(expression) ?? _nullMarker;
+
+        if (value is JsValue constant)
         {
+            return new JintConstantExpression(expression, constant);
         }
 
-        internal static JintExpression Build(Literal expression)
+        return new JintLiteralExpression(expression);
+    }
+
+    internal static JsValue? ConvertToJsValue(Literal literal)
+    {
+        switch (literal.Kind)
         {
-            var constantValue = ConvertToJsValue(expression);
-            if (constantValue is not null)
-            {
-                return new JintConstantExpression(expression, constantValue);
-            }
-
-            return new JintLiteralExpression(expression);
-        }
-
-        internal static JsValue ConvertToJsValue(Literal literal)
-        {
-            if (literal.TokenType == TokenType.BooleanLiteral)
-            {
-                return literal.NumericValue > 0.0 ? JsBoolean.True : JsBoolean.False;
-            }
-
-            if (literal.TokenType == TokenType.NullLiteral)
-            {
+            case TokenKind.BooleanLiteral:
+                return ((BooleanLiteral) literal).Value ? JsBoolean.True : JsBoolean.False;
+            case TokenKind.NullLiteral:
                 return JsValue.Null;
-            }
-
-            if (literal.TokenType == TokenType.NumericLiteral)
-            {
-                var intValue = (int) literal.NumericValue;
-                return literal.NumericValue == intValue
-                       && (intValue != 0 || BitConverter.DoubleToInt64Bits(literal.NumericValue) != JsNumber.NegativeZeroBits)
-                    ? JsNumber.Create(intValue)
-                    : JsNumber.Create(literal.NumericValue);
-            }
-
-            if (literal.TokenType == TokenType.StringLiteral)
-            {
-                return JsString.Create((string) literal.Value);
-            }
-
-            if (literal.TokenType == TokenType.BigIntLiteral)
-            {
-                return JsBigInt.Create((BigInteger) literal.Value);
-            }
-
-            return null;
+            case TokenKind.NumericLiteral:
+                {
+                    var numericValue = ((NumericLiteral) literal).Value;
+                    var intValue = (int) numericValue;
+                    return numericValue == intValue
+                           && (intValue != 0 || BitConverter.DoubleToInt64Bits(numericValue) != JsNumber.NegativeZeroBits)
+                        ? JsNumber.Create(intValue)
+                        : JsNumber.Create(numericValue);
+                }
+            case TokenKind.StringLiteral:
+                return JsString.Create(((StringLiteral) literal).Value);
+            case TokenKind.BigIntLiteral:
+                return JsBigInt.Create(((BigIntLiteral) literal).Value);
+            case TokenKind.RegExpLiteral:
+                break;
         }
 
-        public override Completion GetValue(EvaluationContext context)
+        return null;
+    }
+
+    public override JsValue GetValue(EvaluationContext context)
+    {
+        // need to notify correct node when taking shortcut
+        context.LastSyntaxElement = _expression;
+        return ResolveValue(context);
+    }
+
+    protected override object EvaluateInternal(EvaluationContext context) => ResolveValue(context);
+
+    private JsValue ResolveValue(EvaluationContext context)
+    {
+        var expression = (Literal) _expression;
+        if (expression is RegExpLiteral regExpLiteral)
         {
-            // need to notify correct node when taking shortcut
-            context.LastSyntaxNode = _expression;
-
-            return Completion.Normal(ResolveValue(context), _expression.Location);
-        }
-
-        protected override ExpressionResult EvaluateInternal(EvaluationContext context) => NormalCompletion(ResolveValue(context));
-
-        private JsValue ResolveValue(EvaluationContext context)
-        {
-            var expression = (Literal) _expression;
-            if (expression.TokenType == TokenType.RegularExpression)
+            var regExpParseResult = regExpLiteral.ParseResult;
+            if (regExpParseResult.Success)
             {
-                return context.Engine.Realm.Intrinsics.RegExp.Construct((System.Text.RegularExpressions.Regex) expression.Value, expression.Regex.Pattern, expression.Regex.Flags);
+                var regex = regExpLiteral.UserData as Regex ?? regExpParseResult.Regex!;
+                return context.Engine.Realm.Intrinsics.RegExp.Construct(regex, regExpLiteral.RegExp.Pattern, regExpLiteral.RegExp.Flags, regExpParseResult);
             }
 
-            return JsValue.FromObject(context.Engine, expression.Value);
+            ExceptionHelper.ThrowSyntaxError(context.Engine.Realm, $"Unsupported regular expression. {regExpParseResult.ConversionError!.Description}");
         }
+
+        return JsValue.FromObject(context.Engine, expression.Value);
     }
 }

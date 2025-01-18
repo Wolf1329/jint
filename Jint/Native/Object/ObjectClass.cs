@@ -1,24 +1,14 @@
-namespace Jint.Native.Object
+namespace Jint.Native.Object;
+
+internal enum ObjectClass : byte
 {
-    internal enum ObjectClass : byte
-    {
-        Arguments,
-        Array,
-        Boolean,
-        Date,
-        Error,
-        Function,
-        Iterator,
-        JSON,
-        Math,
-        Number,
-        Object,
-        Promise,
-        Proxy,
-        Reflect,
-        RegExp,
-        String,
-        Symbol,
-        TypeReference
-    }
+    Arguments,
+    Boolean,
+    Date,
+    Error,
+    Function,
+    Number,
+    Object,
+    RegExp,
+    String
 }

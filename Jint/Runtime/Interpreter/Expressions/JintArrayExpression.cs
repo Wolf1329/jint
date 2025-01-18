@@ -1,111 +1,137 @@
-using Esprima.Ast;
 using Jint.Native;
-using Jint.Native.Array;
 using Jint.Native.Iterator;
 
-namespace Jint.Runtime.Interpreter.Expressions
-{
-    internal sealed class JintArrayExpression : JintExpression
-    {
-        private JintExpression[] _expressions;
-        private bool _hasSpreads;
+namespace Jint.Runtime.Interpreter.Expressions;
 
-        public JintArrayExpression(ArrayExpression expression) : base(expression)
+internal sealed class JintArrayExpression : JintExpression
+{
+    private JintExpression?[] _expressions = Array.Empty<JintExpression?>();
+    private bool _hasSpreads;
+    private bool _initialized;
+
+    private JintArrayExpression(ArrayExpression expression) : base(expression)
+    {
+    }
+
+    public static JintExpression Build(ArrayExpression expression)
+    {
+        return expression.Elements.Count == 0
+            ? JintEmptyArrayExpression.Instance
+            : new JintArrayExpression(expression);
+    }
+
+    private void Initialize()
+    {
+        ref readonly var elements = ref ((ArrayExpression) _expression).Elements;
+        var expressions = _expressions = new JintExpression[((ArrayExpression) _expression).Elements.Count];
+        for (var n = 0; n < expressions.Length; n++)
         {
-            _initialized = false;
+            var expr = elements[n];
+            if (expr != null)
+            {
+                var expression = Build(expr);
+                expressions[n] = expression;
+                _hasSpreads |= expr.Type == NodeType.SpreadElement;
+            }
         }
 
-        protected override void Initialize(EvaluationContext context)
-        {
-            var engine = context.Engine;
-            var node = (ArrayExpression) _expression;
-            _expressions = new JintExpression[node.Elements.Count];
-            for (var n = 0; n < _expressions.Length; n++)
-            {
-                var expr = node.Elements[n];
-                if (expr != null)
-                {
-                    var expression = Build(engine, expr);
-                    _expressions[n] = expression;
-                    _hasSpreads |= expr.Type == Nodes.SpreadElement;
-                }
-            }
+        // we get called from nested spread expansion in call
+        _initialized = true;
+    }
 
-            // we get called from nested spread expansion in call
+    protected override object EvaluateInternal(EvaluationContext context)
+    {
+        if (!_initialized)
+        {
+            Initialize();
             _initialized = true;
         }
 
-        protected override ExpressionResult EvaluateInternal(EvaluationContext context)
+        var engine = context.Engine;
+        var a = engine.Realm.Intrinsics.Array.ArrayCreate(_hasSpreads ? 0 : (uint) _expressions.Length);
+
+        uint arrayIndexCounter = 0;
+        foreach (var expr in _expressions)
         {
-            var engine = context.Engine;
-            var a = engine.Realm.Intrinsics.Array.ArrayCreate(_hasSpreads ? 0 : (uint) _expressions.Length);
-
-            uint arrayIndexCounter = 0;
-            foreach (var expr in _expressions)
+            if (expr == null)
             {
-                if (expr == null)
+                a.SetIndexValue(arrayIndexCounter++, null, updateLength: false);
+            }
+            else if (_hasSpreads && expr is JintSpreadExpression jse)
+            {
+                jse.GetValueAndCheckIterator(context, out var objectInstance, out var iterator);
+                // optimize for array
+                if (objectInstance is JsArray ai)
                 {
-                    arrayIndexCounter++;
-                    continue;
-                }
-
-                if (_hasSpreads && expr is JintSpreadExpression jse)
-                {
-                    jse.GetValueAndCheckIterator(context, out var objectInstance, out var iterator);
-                    // optimize for array
-                    if (objectInstance is ArrayInstance ai)
-                    {
-                        var length = ai.GetLength();
-                        var newLength = arrayIndexCounter + length;
-                        a.EnsureCapacity(newLength);
-                        a.CopyValues(ai, sourceStartIndex: 0, targetStartIndex: arrayIndexCounter, length);
-                        arrayIndexCounter += length;
-                        a.SetLength(newLength);
-                    }
-                    else
-                    {
-                        var protocol = new ArraySpreadProtocol(engine, a, iterator, arrayIndexCounter);
-                        protocol.Execute();
-                        arrayIndexCounter += protocol._addedCount;
-                    }
+                    var length = ai.GetLength();
+                    var newLength = arrayIndexCounter + length;
+                    a.EnsureCapacity(newLength);
+                    a.CopyValues(ai, sourceStartIndex: 0, targetStartIndex: arrayIndexCounter, length);
+                    arrayIndexCounter += length;
+                    a.SetLength(newLength);
                 }
                 else
                 {
-                    var value = expr.GetValue(context).Value;
-                    a.SetIndexValue(arrayIndexCounter++, value, updateLength: false);
+                    var protocol = new ArraySpreadProtocol(engine, a, iterator!, arrayIndexCounter);
+                    protocol.Execute();
+                    arrayIndexCounter += protocol._addedCount;
                 }
             }
-
-            if (_hasSpreads)
+            else
             {
-                a.SetLength(arrayIndexCounter);
+                var value = expr.GetValue(context);
+                a.SetIndexValue(arrayIndexCounter++, value, updateLength: false);
             }
-
-            return NormalCompletion(a);
         }
 
-        private sealed class ArraySpreadProtocol : IteratorProtocol
+        if (_hasSpreads)
         {
-            private readonly ArrayInstance _instance;
-            internal long _index;
-            internal uint _addedCount = 0;
+            a.SetLength(arrayIndexCounter);
+        }
 
-            public ArraySpreadProtocol(
-                Engine engine,
-                ArrayInstance instance,
-                IteratorInstance iterator,
-                long startIndex) : base(engine, iterator, 0)
-            {
-                _instance = instance;
-                _index = startIndex - 1;
-            }
+        return a;
+    }
 
-            protected override void ProcessItem(JsValue[] args, JsValue currentValue)
-            {
-                _index++;
-                _addedCount++;
-                _instance.SetIndexValue((uint) _index, currentValue, updateLength: false);
-            }
+    private sealed class ArraySpreadProtocol : IteratorProtocol
+    {
+        private readonly JsArray _instance;
+        private long _index;
+        internal uint _addedCount;
+
+        public ArraySpreadProtocol(
+            Engine engine,
+            JsArray instance,
+            IteratorInstance iterator,
+            long startIndex) : base(engine, iterator, 0)
+        {
+            _instance = instance;
+            _index = startIndex - 1;
+        }
+
+        protected override void ProcessItem(JsValue[] arguments, JsValue currentValue)
+        {
+            _index++;
+            _addedCount++;
+            _instance.SetIndexValue((uint) _index, currentValue, updateLength: false);
+        }
+    }
+
+    internal sealed class JintEmptyArrayExpression : JintExpression
+    {
+        public static JintEmptyArrayExpression Instance = new(new ArrayExpression(NodeList.From(Array.Empty<Expression?>())));
+
+        private JintEmptyArrayExpression(Expression expression) : base(expression)
+        {
+        }
+
+        protected override object EvaluateInternal(EvaluationContext context)
+        {
+            return new JsArray(context.Engine, Array.Empty<JsValue>());
+        }
+
+        public override JsValue GetValue(EvaluationContext context)
+        {
+            return new JsArray(context.Engine, Array.Empty<JsValue>());
         }
     }
 }

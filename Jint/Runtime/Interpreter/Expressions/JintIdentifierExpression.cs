@@ -1,78 +1,94 @@
-using Esprima.Ast;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using Jint.Native;
-using Jint.Native.Argument;
 using Jint.Runtime.Environments;
+using Environment = Jint.Runtime.Environments.Environment;
 
-namespace Jint.Runtime.Interpreter.Expressions
+namespace Jint.Runtime.Interpreter.Expressions;
+
+internal sealed class JintIdentifierExpression : JintExpression
 {
-    internal sealed class JintIdentifierExpression : JintExpression
+    private readonly Environment.BindingName _identifier;
+
+    public JintIdentifierExpression(Identifier expression) : this(expression, new Environment.BindingName(expression.Name))
     {
-        internal readonly EnvironmentRecord.BindingName _expressionName;
-        private readonly JsValue _calculatedValue;
+        _identifier = new Environment.BindingName(((Identifier) _expression).Name);
+    }
 
-        public JintIdentifierExpression(Identifier expression) : base(expression)
+    public JintIdentifierExpression(Identifier identifier, Environment.BindingName bindingName) : base(identifier)
+    {
+        _identifier = bindingName;
+    }
+
+    public Environment.BindingName Identifier => _identifier;
+
+    public bool HasEvalOrArguments
+    {
+        get
         {
-            _expressionName = new EnvironmentRecord.BindingName(expression.Name);
-            if (expression.Name == "undefined")
-            {
-                _calculatedValue = JsValue.Undefined;
-            }
+            var key = _identifier.Key;
+            return key == KnownKeys.Eval || key == KnownKeys.Arguments;
+        }
+    }
+
+    protected override object EvaluateInternal(EvaluationContext context)
+    {
+        var engine = context.Engine;
+        var env = engine.ExecutionContext.LexicalEnvironment;
+        var strict = StrictModeScope.IsStrictModeCode;
+        var identifierEnvironment = JintEnvironment.TryGetIdentifierEnvironmentWithBinding(env, _identifier, out var temp)
+            ? temp
+            : JsValue.Undefined;
+
+        return engine._referencePool.Rent(identifierEnvironment, _identifier.Value, strict, thisValue: null);
+    }
+
+    public override JsValue GetValue(EvaluationContext context)
+    {
+        // need to notify correct node when taking shortcut
+        context.LastSyntaxElement = _expression;
+
+        var identifier = Identifier;
+        if (identifier.CalculatedValue is not null)
+        {
+            return identifier.CalculatedValue;
         }
 
-        public bool HasEvalOrArguments
-            => _expressionName.Key == KnownKeys.Eval || _expressionName.Key == KnownKeys.Arguments;
+        var engine = context.Engine;
+        var env = engine.ExecutionContext.LexicalEnvironment;
+        var strict = StrictModeScope.IsStrictModeCode;
 
-        protected override ExpressionResult EvaluateInternal(EvaluationContext context)
-        {
-            var engine = context.Engine;
-            var env = engine.ExecutionContext.LexicalEnvironment;
-            var strict = StrictModeScope.IsStrictModeCode;
-            var identifierEnvironment = JintEnvironment.TryGetIdentifierEnvironmentWithBinding(env, _expressionName, out var temp)
-                ? temp
-                : JsValue.Undefined;
-
-            return NormalCompletion(engine._referencePool.Rent(identifierEnvironment, _expressionName.StringValue, strict, thisValue: null));
-        }
-
-        public override Completion GetValue(EvaluationContext context)
-        {
-            // need to notify correct node when taking shortcut
-            context.LastSyntaxNode = _expression;
-
-            if (_calculatedValue is not null)
-            {
-                return Completion.Normal(_calculatedValue, _expression.Location);
-            }
-
-            var strict = StrictModeScope.IsStrictModeCode;
-            var engine = context.Engine;
-            var env = engine.ExecutionContext.LexicalEnvironment;
-
-            if (JintEnvironment.TryGetIdentifierEnvironmentWithBindingValue(
+        if (JintEnvironment.TryGetIdentifierEnvironmentWithBindingValue(
                 env,
-                _expressionName,
+                identifier,
                 strict,
                 out _,
                 out var value))
+        {
+            if (value is null)
             {
-                if (value is null)
-                {
-                    ExceptionHelper.ThrowReferenceError(engine.Realm, _expressionName.Key.Name + " has not been initialized");
-                }
+                ThrowNotInitialized(engine);
             }
-            else
-            {
-                var reference = engine._referencePool.Rent(JsValue.Undefined, _expressionName.StringValue, strict, thisValue: null);
-                value = engine.GetValue(reference, true);
-            }
-
-            // make sure arguments access freezes state
-            if (value is ArgumentsInstance argumentsInstance)
-            {
-                argumentsInstance.Materialize();
-            }
-
-            return Completion.Normal(value, _expression.Location);
         }
+        else
+        {
+            var reference = engine._referencePool.Rent(JsValue.Undefined, identifier.Value, strict, thisValue: null);
+            value = engine.GetValue(reference, returnReferenceToPool: true);
+        }
+
+        // make sure arguments access freezes state
+        if (value is JsArguments argumentsInstance)
+        {
+            argumentsInstance.Materialize();
+        }
+
+        return value;
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ThrowNotInitialized(Engine engine)
+    {
+        ExceptionHelper.ThrowReferenceError(engine.Realm, $"{_identifier.Key.Name} has not been initialized");
     }
 }

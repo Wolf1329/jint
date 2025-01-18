@@ -1,55 +1,52 @@
-﻿using Jint.Native;
-using Jint.Native.Argument;
+using Jint.Native;
 using Jint.Native.Function;
 using Jint.Runtime.Environments;
-using Jint.Runtime.References;
 
-namespace Jint.Pooling
+namespace Jint.Pooling;
+
+/// <summary>
+/// Cache reusable <see cref="JsArguments" /> instances as we allocate them a lot.
+/// </summary>
+internal sealed class ArgumentsInstancePool
 {
-    /// <summary>
-    /// Cache reusable <see cref="Reference" /> instances as we allocate them a lot.
-    /// </summary>
-    internal sealed class ArgumentsInstancePool
+    private const int PoolSize = 10;
+    private readonly Engine _engine;
+    private readonly ObjectPool<JsArguments> _pool;
+
+    public ArgumentsInstancePool(Engine engine)
     {
-        private const int PoolSize = 10;
-        private readonly Engine _engine;
-        private readonly ObjectPool<ArgumentsInstance> _pool;
+        _engine = engine;
+        _pool = new ObjectPool<JsArguments>(Factory, PoolSize);
+    }
 
-        public ArgumentsInstancePool(Engine engine)
+    private JsArguments Factory()
+    {
+        return new JsArguments(_engine)
         {
-            _engine = engine;
-            _pool = new ObjectPool<ArgumentsInstance>(Factory, PoolSize);
-        }
+            _prototype = _engine.Realm.Intrinsics.Object.PrototypeObject
+        };
+    }
 
-        private ArgumentsInstance Factory()
+    public JsArguments Rent(JsValue[] argumentsList) => Rent(null, null, argumentsList, null, false);
+
+    public JsArguments Rent(
+        Function? func,
+        Key[]? formals,
+        JsValue[] argumentsList,
+        DeclarativeEnvironment? env,
+        bool hasRestParameter)
+    {
+        var obj = _pool.Allocate();
+        obj.Prepare(func!, formals!, argumentsList, env!, hasRestParameter);
+        return obj;
+    }
+
+    public void Return(JsArguments instance)
+    {
+        if (instance is null)
         {
-            return new ArgumentsInstance(_engine)
-            {
-                _prototype = _engine.Realm.Intrinsics.Object.PrototypeObject
-            };
+            return;
         }
-
-        public ArgumentsInstance Rent(JsValue[] argumentsList) => Rent(null, null, argumentsList, null, false);
-
-        public ArgumentsInstance Rent(
-            FunctionInstance func,
-            Key[] formals,
-            JsValue[] argumentsList,
-            DeclarativeEnvironmentRecord env, 
-            bool hasRestParameter)
-        {
-            var obj = _pool.Allocate();
-            obj.Prepare(func, formals, argumentsList, env, hasRestParameter);
-            return obj;
-        }
-
-        public void Return(ArgumentsInstance instance)
-        {
-            if (ReferenceEquals(instance, null))
-            {
-                return;
-            }
-            _pool.Free(instance);;
-        }
+        _pool.Free(instance);
     }
 }

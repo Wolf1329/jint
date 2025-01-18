@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
 namespace Jint.Native;
@@ -7,7 +6,7 @@ internal sealed class SameValueZeroComparer : IEqualityComparer<JsValue>
 {
     public static readonly SameValueZeroComparer Instance = new();
 
-    bool IEqualityComparer<JsValue>.Equals(JsValue x, JsValue y)
+    bool IEqualityComparer<JsValue>.Equals(JsValue? x, JsValue? y)
     {
         return Equals(x, y);
     }
@@ -18,7 +17,7 @@ internal sealed class SameValueZeroComparer : IEqualityComparer<JsValue>
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static bool Equals(JsValue x, JsValue y)
+    internal static bool Equals(JsValue? x, JsValue? y)
     {
         return x == y || x is JsNumber xNum && y is JsNumber yNum && double.IsNaN(xNum._value) && double.IsNaN(yNum._value);
     }

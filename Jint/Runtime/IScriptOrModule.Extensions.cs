@@ -1,16 +1,12 @@
-#nullable enable
-
-using Esprima;
-using Jint.Runtime.Modules;
+using Module = Jint.Runtime.Modules.Module;
 
 namespace Jint.Runtime;
 
 internal static class ScriptOrModuleExtensions
 {
-    public static ModuleRecord AsModule(this IScriptOrModule? scriptOrModule, Engine engine, Location location)
+    public static Module AsModule(this IScriptOrModule? scriptOrModule, Engine engine, in SourceLocation location)
     {
-        var module = scriptOrModule as ModuleRecord;
-        if (module == null)
+        if (scriptOrModule is not Module module)
         {
             ExceptionHelper.ThrowSyntaxError(engine.Realm, "Cannot use import/export statements outside a module", location);
             return default!;

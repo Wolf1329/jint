@@ -1,16 +1,15 @@
-using Esprima.Ast;
+using Jint.Native;
 
-namespace Jint.Runtime.Interpreter.Statements
+namespace Jint.Runtime.Interpreter.Statements;
+
+internal sealed class JintEmptyStatement : JintStatement<EmptyStatement>
 {
-    internal sealed class JintEmptyStatement : JintStatement<EmptyStatement>
+    public JintEmptyStatement(EmptyStatement statement) : base(statement)
     {
-        public JintEmptyStatement(EmptyStatement statement) : base(statement)
-        {
-        }
+    }
 
-        protected override Completion ExecuteInternal(EvaluationContext context)
-        {
-            return new Completion(CompletionType.Normal, null, null, Location);
-        }
+    protected override Completion ExecuteInternal(EvaluationContext context)
+    {
+        return new Completion(CompletionType.Normal, JsEmpty.Instance, _statement);
     }
 }

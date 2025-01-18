@@ -1,32 +1,30 @@
-using Esprima.Ast;
 using Jint.Runtime.Interpreter.Expressions;
-using Jint.Runtime.References;
 
-namespace Jint.Runtime.Interpreter.Statements
+namespace Jint.Runtime.Interpreter.Statements;
+
+internal sealed class JintExpressionStatement : JintStatement<ExpressionStatement>
 {
-    internal sealed class JintExpressionStatement : JintStatement<ExpressionStatement>
+    private JintExpression _expression = null!;
+
+    // identifiers are queried the most
+    private JintIdentifierExpression? _identifierExpression;
+
+    public JintExpressionStatement(ExpressionStatement statement) : base(statement)
     {
-        private JintExpression _expression;
+    }
 
-        public JintExpressionStatement(ExpressionStatement statement) : base(statement)
-        {
-        }
+    protected override void Initialize(EvaluationContext context)
+    {
+        _expression = JintExpression.Build(_statement.Expression);
+        _identifierExpression = _expression as JintIdentifierExpression;
+    }
 
-        protected override void Initialize(EvaluationContext context)
-        {
-            _expression = JintExpression.Build(context.Engine, _statement.Expression);
-        }
+    protected override Completion ExecuteInternal(EvaluationContext context)
+    {
+        var value = _identifierExpression is not null
+            ? _identifierExpression.GetValue(context)
+            : _expression.GetValue(context);
 
-        protected override Completion ExecuteInternal(EvaluationContext context)
-        {
-            var result = _expression.Evaluate(context);
-
-            if (result.Type != ExpressionCompletionType.Reference)
-            {
-                return new Completion(result);
-            }
-
-            return new Completion(CompletionType.Normal, context.Engine.GetValue((Reference) result.Value, true), null, Location);
-        }
+        return new Completion(context.Completion, value, _statement);
     }
 }
