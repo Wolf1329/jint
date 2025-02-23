@@ -1,24 +1,19 @@
-﻿using Jint.Native.Object;
+using Jint.Native.Object;
 using Jint.Runtime;
 
 namespace Jint.Native.BigInt;
 
-public sealed class BigIntInstance : ObjectInstance, IPrimitiveInstance
+internal sealed class BigIntInstance : ObjectInstance, IJsPrimitive
 {
-    public BigIntInstance(Engine engine)
-        : base(engine, ObjectClass.Object)
-    {
-    }
-
     public BigIntInstance(Engine engine, JsBigInt value)
-        : this(engine)
+        : base(engine, ObjectClass.Object)
     {
         BigIntData = value;
     }
 
-    Types IPrimitiveInstance.Type => Types.BigInt;
+    Types IJsPrimitive.Type => Types.BigInt;
 
-    JsValue IPrimitiveInstance.PrimitiveValue => BigIntData;
+    JsValue IJsPrimitive.PrimitiveValue => BigIntData;
 
-    public JsBigInt BigIntData { get; internal init; }
+    public JsBigInt BigIntData { get; }
 }

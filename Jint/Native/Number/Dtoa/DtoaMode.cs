@@ -1,9 +1,10 @@
-namespace Jint.Native.Number.Dtoa
+#nullable disable
+
+namespace Jint.Native.Number.Dtoa;
+
+internal enum DtoaMode
 {
-    internal enum DtoaMode
-    {
-        Shortest,
-        Precision,
-        Fixed
-    }
+    Shortest,
+    Precision,
+    Fixed
 }

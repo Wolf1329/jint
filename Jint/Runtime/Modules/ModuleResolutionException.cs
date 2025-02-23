@@ -1,16 +1,16 @@
-﻿#nullable enable
-
 namespace Jint.Runtime.Modules;
 
 public sealed class ModuleResolutionException : JintException
 {
+    public ModuleResolutionException(string resolverAlgorithmError, string specifier, string? parent, string? filePath)
+        : base($"{resolverAlgorithmError} in module '{parent ?? "(null)"}': '{specifier}'")
+    {
+        ResolverAlgorithmError = resolverAlgorithmError;
+        Specifier = specifier;
+        FilePath = filePath;
+    }
+
     public string ResolverAlgorithmError { get; }
     public string Specifier { get; }
-    
-    public ModuleResolutionException(string message, string specifier, string? parent)
-        : base($"{message} in module '{parent ?? "(null)"}': '{specifier}'")
-    {
-        ResolverAlgorithmError = message;
-        Specifier = specifier;
-    }
+    public string? FilePath { get; }
 }

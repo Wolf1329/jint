@@ -1,10 +1,9 @@
-﻿namespace Jint.Runtime.Debugger
+namespace Jint.Runtime.Debugger;
+
+public enum StepMode
 {
-    public enum StepMode
-    {
-        None,
-        Over,
-        Into,
-        Out
-    }
+    None,
+    Over,
+    Into,
+    Out
 }

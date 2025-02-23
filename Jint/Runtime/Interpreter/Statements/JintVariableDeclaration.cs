@@ -1,133 +1,125 @@
-using Esprima.Ast;
 using Jint.Native;
 using Jint.Native.Function;
 using Jint.Runtime.Interpreter.Expressions;
-using Jint.Runtime.References;
 
-namespace Jint.Runtime.Interpreter.Statements
+namespace Jint.Runtime.Interpreter.Statements;
+
+internal sealed class JintVariableDeclaration : JintStatement<VariableDeclaration>
 {
-    internal sealed class JintVariableDeclaration : JintStatement<VariableDeclaration>
+    private ResolvedDeclaration[] _declarations = [];
+
+    private sealed class ResolvedDeclaration
     {
-        private static readonly Completion VoidCompletion = new(CompletionType.Normal, null!, default);
+        internal JintExpression? Left;
+        internal DestructuringPattern? LeftPattern;
+        internal JintExpression? Init;
+        internal JintIdentifierExpression? LeftIdentifierExpression;
+        internal bool EvalOrArguments;
+    }
 
-        private ResolvedDeclaration[] _declarations;
+    public JintVariableDeclaration(VariableDeclaration statement) : base(statement)
+    {
+    }
 
-        private sealed class ResolvedDeclaration
+    protected override void Initialize(EvaluationContext context)
+    {
+        _declarations = new ResolvedDeclaration[_statement.Declarations.Count];
+        for (var i = 0; i < _declarations.Length; i++)
         {
-            internal JintExpression Left;
-            internal BindingPattern LeftPattern;
-            internal JintExpression Init;
-            internal JintIdentifierExpression LeftIdentifierExpression;
-            internal bool EvalOrArguments;
-        }
+            var declaration = _statement.Declarations[i];
 
-        public JintVariableDeclaration(VariableDeclaration statement) : base(statement)
-        {
-        }
+            JintExpression? left = null;
+            JintExpression? init = null;
+            DestructuringPattern? pattern = null;
 
-        protected override void Initialize(EvaluationContext context)
-        {
-            var engine = context.Engine;
-            _declarations = new ResolvedDeclaration[_statement.Declarations.Count];
-            for (var i = 0; i < _declarations.Length; i++)
+            if (declaration.Id is DestructuringPattern bp)
             {
-                var declaration = _statement.Declarations[i];
+                pattern = bp;
+            }
+            else
+            {
+                left = JintExpression.Build((Identifier) declaration.Id);
+            }
 
-                JintExpression left = null;
-                JintExpression init = null;
-                BindingPattern bindingPattern = null;
+            if (declaration.Init != null)
+            {
+                init = JintExpression.Build(declaration.Init);
+            }
 
-                if (declaration.Id is BindingPattern bp)
-                {
-                    bindingPattern = bp;
-                }
-                else
-                {
-                    left = JintExpression.Build(engine, declaration.Id);
-                }
+            var leftIdentifier = left as JintIdentifierExpression;
+            _declarations[i] = new ResolvedDeclaration
+            {
+                Left = left,
+                LeftPattern = pattern,
+                LeftIdentifierExpression = leftIdentifier,
+                EvalOrArguments = leftIdentifier?.HasEvalOrArguments == true,
+                Init = init
+            };
+        }
+    }
 
+    protected override Completion ExecuteInternal(EvaluationContext context)
+    {
+        var engine = context.Engine;
+        foreach (var declaration in _declarations)
+        {
+            if (_statement.Kind != VariableDeclarationKind.Var && declaration.Left != null)
+            {
+                var lhs = (Reference) declaration.Left.Evaluate(context);
+                var value = JsValue.Undefined;
                 if (declaration.Init != null)
                 {
-                    init = JintExpression.Build(engine, declaration.Init);
+                    value = declaration.Init.GetValue(context).Clone();
+                    if (declaration.Init._expression.IsFunctionDefinition())
+                    {
+                        ((Function) value).SetFunctionName(lhs.ReferencedName);
+                    }
                 }
 
-                var leftIdentifier = left as JintIdentifierExpression;
-                _declarations[i] = new ResolvedDeclaration
-                {
-                    Left = left,
-                    LeftPattern = bindingPattern,
-                    LeftIdentifierExpression = leftIdentifier,
-                    EvalOrArguments = leftIdentifier?.HasEvalOrArguments == true,
-                    Init = init
-                };
+                lhs.InitializeReferencedBinding(value);
+                engine._referencePool.Return(lhs);
             }
-        }
-
-        protected override Completion ExecuteInternal(EvaluationContext context)
-        {
-            var engine = context.Engine;
-            foreach (var declaration in _declarations)
+            else if (declaration.Init != null)
             {
-                if (_statement.Kind != VariableDeclarationKind.Var && declaration.Left != null)
+                if (declaration.LeftPattern != null)
                 {
-                    var lhs = (Reference) declaration.Left.Evaluate(context).Value;
-                    var value = JsValue.Undefined;
-                    if (declaration.Init != null)
+                    var environment = _statement.Kind != VariableDeclarationKind.Var
+                        ? engine.ExecutionContext.LexicalEnvironment
+                        : null;
+
+                    var value = declaration.Init.GetValue(context);
+
+                    DestructuringPatternAssignmentExpression.ProcessPatterns(
+                        context,
+                        declaration.LeftPattern,
+                        value,
+                        environment,
+                        checkPatternPropertyReference: _statement.Kind != VariableDeclarationKind.Var);
+                }
+                else if (declaration.LeftIdentifierExpression == null
+                         || JintAssignmentExpression.SimpleAssignmentExpression.AssignToIdentifier(
+                             context,
+                             declaration.LeftIdentifierExpression,
+                             declaration.Init,
+                             declaration.EvalOrArguments) is null)
+                {
+                    // slow path
+                    var lhs = (Reference) declaration.Left!.Evaluate(context);
+                    lhs.AssertValid(engine.Realm);
+
+                    var value = declaration.Init.GetValue(context).Clone();
+
+                    if (declaration.Init._expression.IsFunctionDefinition())
                     {
-                        var completion = declaration.Init.GetValue(context);
-                        value = completion.Value.Clone();
-                        if (declaration.Init._expression.IsFunctionDefinition())
-                        {
-                            ((FunctionInstance) value).SetFunctionName(lhs.GetReferencedName());
-                        }
+                        ((Function) value).SetFunctionName(lhs.ReferencedName);
                     }
 
-                    lhs.InitializeReferencedBinding(value);
+                    engine.PutValue(lhs, value);
                     engine._referencePool.Return(lhs);
                 }
-                else if (declaration.Init != null)
-                {
-                    if (declaration.LeftPattern != null)
-                    {
-                        var environment = _statement.Kind != VariableDeclarationKind.Var
-                            ? engine.ExecutionContext.LexicalEnvironment
-                            : null;
-
-                        var completion = declaration.Init.GetValue(context);
-
-                        BindingPatternAssignmentExpression.ProcessPatterns(
-                            context,
-                            declaration.LeftPattern,
-                            completion.Value,
-                            environment,
-                            checkObjectPatternPropertyReference: _statement.Kind != VariableDeclarationKind.Var);
-                    }
-                    else if (declaration.LeftIdentifierExpression == null
-                             || JintAssignmentExpression.SimpleAssignmentExpression.AssignToIdentifier(
-                                 context,
-                                 declaration.LeftIdentifierExpression,
-                                 declaration.Init,
-                                 declaration.EvalOrArguments) is null)
-                    {
-                        // slow path
-                        var lhs = (Reference) declaration.Left.Evaluate(context).Value;
-                        lhs.AssertValid(engine.Realm);
-
-                        var completion = declaration.Init.GetValue(context);
-                        var value = completion.Value.Clone();
-
-                        if (declaration.Init._expression.IsFunctionDefinition())
-                        {
-                            ((FunctionInstance) value).SetFunctionName(lhs.GetReferencedName());
-                        }
-
-                        engine.PutValue(lhs, value);
-                        engine._referencePool.Return(lhs);
-                    }
-                }
             }
-
-            return VoidCompletion;
         }
+
+        return Completion.Empty();
     }
 }

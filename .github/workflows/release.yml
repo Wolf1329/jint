@@ -5,24 +5,26 @@ on:
     tags:
       - 'v*.*.*'
 
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+
 jobs:
   build:
 
     runs-on: ubuntu-latest
-    env:
-        DOTNET_NOLOGO: true
-        DOTNET_CLI_TELEMETRY_OPTOUT: 1
-
     steps:
-    - name: Checkout source code
-      uses: actions/checkout@v2
 
-    - name: Generate test cases
-      working-directory: ./Jint.Tests.Test262
-      run: dotnet tool restore && dotnet test262 generate
+    - name: Setup NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 9.0
+
+    - name: Checkout source code
+      uses: actions/checkout@v4
 
     - name: Test
-      run: dotnet test --configuration Release --logger:"console;verbosity=quiet"
+      run: dotnet test --configuration Release --logger GitHubActions
 
     - name: Pack with dotnet
       run: |
@@ -30,7 +32,7 @@ jobs:
         VERSION="${arrTag[2]}"
         VERSION="${VERSION//v}"
         echo "$VERSION"
-        dotnet pack --output artifacts --configuration Release -p:Version=$VERSION
+        dotnet pack Jint/Jint.csproj --output artifacts --configuration Release -p:Version=$VERSION -p:ContinuousIntegrationBuild=True
 
     - name: Push with dotnet
       run: dotnet nuget push artifacts/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json

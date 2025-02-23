@@ -1,125 +1,132 @@
-﻿#nullable enable
-
-using System;
-using System.Collections.Generic;
-using Esprima;
-using Jint.Native;
+﻿using Jint.Native;
 using Jint.Native.Object;
 using Jint.Native.Promise;
 using Jint.Runtime;
 using Jint.Runtime.Interpreter;
 using Jint.Runtime.Modules;
+using Module = Jint.Runtime.Modules.Module;
 
-namespace Jint
+namespace Jint;
+
+public partial class Engine
 {
-    public partial class Engine
+    public ModuleOperations Modules { get; internal set; } = null!;
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-getactivescriptormodule
+    /// </summary>
+    internal IScriptOrModule? GetActiveScriptOrModule()
     {
-        internal IModuleLoader ModuleLoader { get; set; }
+        return _executionContexts?.GetActiveScriptOrModule();
+    }
 
-        private readonly Dictionary<string, ModuleRecord> _modules = new();
-        private readonly Dictionary<string, ModuleBuilder> _builders = new();
+    public class ModuleOperations
+    {
+        private readonly Engine _engine;
+        private readonly Dictionary<string, Module> _modules = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, ModuleBuilder> _builders = new(StringComparer.Ordinal);
 
-        /// <summary>
-        /// https://tc39.es/ecma262/#sec-getactivescriptormodule
-        /// </summary>
-        internal IScriptOrModule? GetActiveScriptOrModule()
+        public ModuleOperations(Engine engine, IModuleLoader moduleLoader)
         {
-            return _executionContexts?.GetActiveScriptOrModule();
+            ModuleLoader = moduleLoader;
+            _engine = engine;
         }
 
-        internal ModuleRecord LoadModule(string? referencingModuleLocation, string specifier)
+        internal IModuleLoader ModuleLoader { get; }
+
+        internal Module Load(string? referencingModuleLocation, ModuleRequest request)
         {
-            var moduleResolution = ModuleLoader.Resolve(referencingModuleLocation, specifier);
+            var moduleResolution = ModuleLoader.Resolve(referencingModuleLocation, request);
 
             if (_modules.TryGetValue(moduleResolution.Key, out var module))
             {
                 return module;
             }
 
-            if (_builders.TryGetValue(specifier, out var moduleBuilder))
+            if (_builders.TryGetValue(moduleResolution.Key, out var moduleBuilder))
             {
-                module = LoadFromBuilder(specifier, moduleBuilder, moduleResolution);
+                module = LoadFromBuilder(moduleResolution.Key, moduleBuilder, moduleResolution);
             }
             else
             {
-                module = LoaderFromModuleLoader(moduleResolution);
+                module = LoadFromModuleLoader(moduleResolution);
+            }
+
+            if (module is SourceTextModule sourceTextModule)
+            {
+                _engine.Debugger.OnBeforeEvaluate(sourceTextModule._source);
             }
 
             return module;
         }
 
-        private CyclicModuleRecord LoadFromBuilder(string specifier, ModuleBuilder moduleBuilder, ResolvedSpecifier moduleResolution)
+        private BuilderModule LoadFromBuilder(string specifier, ModuleBuilder moduleBuilder, ResolvedSpecifier moduleResolution)
         {
             var parsedModule = moduleBuilder.Parse();
-            var module = new BuilderModuleRecord(this, Realm, parsedModule, null, false);
+            var module = new BuilderModule(_engine, _engine.Realm, parsedModule, location: parsedModule.Program!.Location.SourceFile, async: false);
             _modules[moduleResolution.Key] = module;
             moduleBuilder.BindExportedValues(module);
             _builders.Remove(specifier);
             return module;
         }
 
-        private CyclicModuleRecord LoaderFromModuleLoader(ResolvedSpecifier moduleResolution)
+        private Module LoadFromModuleLoader(ResolvedSpecifier moduleResolution)
         {
-            var parsedModule = ModuleLoader.LoadModule(this, moduleResolution);
-            var module = new SourceTextModuleRecord(this, Realm, parsedModule, moduleResolution.Uri?.LocalPath, false);
+            var module = ModuleLoader.LoadModule(_engine, moduleResolution);
             _modules[moduleResolution.Key] = module;
             return module;
         }
 
-        public void AddModule(string specifier, string code)
+        public void Add(string specifier, string code)
         {
-            var moduleBuilder = new ModuleBuilder(this, specifier);
+            var moduleBuilder = new ModuleBuilder(_engine, specifier);
             moduleBuilder.AddSource(code);
-            AddModule(specifier, moduleBuilder);
+            Add(specifier, moduleBuilder);
         }
 
-        public void AddModule(string specifier, Action<ModuleBuilder> buildModule)
+        public void Add(string specifier, Action<ModuleBuilder> buildModule)
         {
-            var moduleBuilder = new ModuleBuilder(this, specifier);
+            var moduleBuilder = new ModuleBuilder(_engine, specifier);
             buildModule(moduleBuilder);
-            AddModule(specifier, moduleBuilder);
+            Add(specifier, moduleBuilder);
         }
 
-        public void AddModule(string specifier, ModuleBuilder moduleBuilder)
+        public void Add(string specifier, ModuleBuilder moduleBuilder)
         {
             _builders.Add(specifier, moduleBuilder);
         }
 
-        public ObjectInstance ImportModule(string specifier)
+        public ObjectInstance Import(string specifier)
         {
-            return ImportModule(specifier, null);
+            return Import(specifier, referencingModuleLocation: null);
         }
 
-        internal ObjectInstance ImportModule(string specifier, string? referencingModuleLocation)
+        internal ObjectInstance Import(string specifier, string? referencingModuleLocation)
         {
-            var moduleResolution = ModuleLoader.Resolve(referencingModuleLocation, specifier);
+            return Import(new ModuleRequest(specifier, []), referencingModuleLocation);
+        }
+
+        internal ObjectInstance Import(ModuleRequest request, string? referencingModuleLocation)
+        {
+            var moduleResolution = ModuleLoader.Resolve(referencingModuleLocation, request);
 
             if (!_modules.TryGetValue(moduleResolution.Key, out var module))
             {
-                module = LoadModule(null, specifier);
+                module = Load(referencingModuleLocation, request);
             }
 
-            if (module is not CyclicModuleRecord cyclicModule)
+            if (module is not CyclicModule cyclicModule)
             {
-                module.Link();
-                EvaluateModule(specifier, module);
+                LinkModule(request.Specifier, module);
+                EvaluateModule(request.Specifier, module);
             }
             else if (cyclicModule.Status == ModuleStatus.Unlinked)
             {
-                try
-                {
-                    cyclicModule.Link();
-                }
-                catch (JavaScriptException ex)
-                {
-                    if (ex.Location.Source == null)
-                        ex.SetLocation(new Location(new Position(), new Position(), specifier));
-                    throw;
-                }
+                LinkModule(request.Specifier, cyclicModule);
 
                 if (cyclicModule.Status == ModuleStatus.Linked)
                 {
-                    EvaluateModule(specifier, cyclicModule);
+                    _engine.ExecuteWithConstraints(true, () => EvaluateModule(request.Specifier, cyclicModule));
                 }
 
                 if (cyclicModule.Status != ModuleStatus.Evaluated)
@@ -128,41 +135,53 @@ namespace Jint
                 }
             }
 
-            RunAvailableContinuations();
+            _engine.RunAvailableContinuations();
 
-            return ModuleRecord.GetModuleNamespace(module);
+            return Module.GetModuleNamespace(module);
         }
 
-        private void EvaluateModule(string specifier, ModuleRecord cyclicModule)
+        private static void LinkModule(string specifier, Module module)
         {
-            var ownsContext = _activeEvaluationContext is null;
-            _activeEvaluationContext ??= new EvaluationContext(this);
+            module.Link();
+        }
+
+        private JsValue EvaluateModule(string specifier, Module module)
+        {
+            var ownsContext = _engine._activeEvaluationContext is null;
+            _engine. _activeEvaluationContext ??= new EvaluationContext(_engine);
             JsValue evaluationResult;
             try
             {
-                evaluationResult = cyclicModule.Evaluate();
+                evaluationResult = module.Evaluate();
             }
             finally
             {
                 if (ownsContext)
                 {
-                    _activeEvaluationContext = null;
+                    _engine._activeEvaluationContext = null!;
                 }
             }
 
             // This should instead be returned and resolved in ImportModule(specifier) only so Host.ImportModuleDynamically can use this promise
-            if (evaluationResult is not PromiseInstance promise)
+            if (evaluationResult is not JsPromise promise)
             {
                 ExceptionHelper.ThrowInvalidOperationException($"Error while evaluating module: Module evaluation did not return a promise: {evaluationResult.Type}");
             }
             else if (promise.State == PromiseState.Rejected)
             {
-                ExceptionHelper.ThrowJavaScriptException(this, promise.Value, new Completion(CompletionType.Throw, promise.Value, null, new Location(new Position(), new Position(), specifier)));
+                var location = module is CyclicModule cyclicModuleRecord
+                    ? cyclicModuleRecord.AbnormalCompletionLocation
+                    : SourceLocation.From(new Position(), new Position());
+
+                var node = AstExtensions.CreateLocationNode(location);
+                ExceptionHelper.ThrowJavaScriptException(_engine, promise.Value, node.Location);
             }
             else if (promise.State != PromiseState.Fulfilled)
             {
                 ExceptionHelper.ThrowInvalidOperationException($"Error while evaluating module: Module evaluation did not return a fulfilled promise: {promise.State}");
             }
+
+            return evaluationResult;
         }
     }
 }

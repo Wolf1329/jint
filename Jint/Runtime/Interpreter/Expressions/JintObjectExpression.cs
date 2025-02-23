@@ -1,234 +1,259 @@
-#nullable enable
-
-using Esprima.Ast;
 using Jint.Collections;
 using Jint.Native;
 using Jint.Native.Function;
 using Jint.Native.Object;
 using Jint.Runtime.Descriptors;
 
-namespace Jint.Runtime.Interpreter.Expressions
+namespace Jint.Runtime.Interpreter.Expressions;
+
+/// <summary>
+/// https://tc39.es/ecma262/#sec-object-initializer
+/// </summary>
+internal sealed class JintObjectExpression : JintExpression
 {
-    /// <summary>
-    /// https://tc39.es/ecma262/#sec-object-initializer
-    /// </summary>
-    internal sealed class JintObjectExpression : JintExpression
+    private readonly ExpressionCache _valueExpressions = new();
+    private ObjectProperty?[] _properties = [];
+
+    // check if we can do a shortcut when all are object properties
+    // and don't require duplicate checking
+    private bool _canBuildFast;
+    private bool _initialized;
+
+    private sealed class ObjectProperty
     {
-        private JintExpression[] _valueExpressions = System.Array.Empty<JintExpression>();
-        private ObjectProperty?[] _properties = System.Array.Empty<ObjectProperty>();
+        internal readonly string? _key;
+        private JsString? _keyJsString;
+        internal readonly Property _value;
+        private JintFunctionDefinition? _functionDefinition;
 
-        // check if we can do a shortcut when all are object properties
-        // and don't require duplicate checking
-        private bool _canBuildFast;
-
-        private class ObjectProperty
+        public ObjectProperty(string? key, Property property)
         {
-            internal readonly string? _key;
-            private JsString? _keyJsString;
-            internal readonly Property _value;
-            private JintFunctionDefinition? _functionDefinition;
+            _key = key;
+            _value = property;
+        }
 
-            public ObjectProperty(string? key, Property property)
+        public JsString? KeyJsString => _keyJsString ??= _key != null ? JsString.Create(_key) : null;
+
+        public JintFunctionDefinition GetFunctionDefinition(Engine engine)
+        {
+            if (_functionDefinition is not null)
             {
-                _key = key;
-                _value = property;
-            }
-
-            public JsString? KeyJsString => _keyJsString ??= _key != null ? JsString.Create(_key) : null;
-
-            public JintFunctionDefinition GetFunctionDefinition(Engine engine)
-            {
-                if (_functionDefinition is not null)
-                {
-                    return _functionDefinition;
-                }
-
-                var function = _value.Value as IFunction;
-                if (function is null)
-                {
-                    ExceptionHelper.ThrowSyntaxError(engine.Realm);
-                }
-
-                _functionDefinition = new JintFunctionDefinition(engine, function);
                 return _functionDefinition;
             }
-        }
 
-        public JintObjectExpression(ObjectExpression expression) : base(expression)
-        {
-            _initialized = false;
-        }
-
-        protected override void Initialize(EvaluationContext context)
-        {
-            _canBuildFast = true;
-            var expression = (ObjectExpression) _expression;
-            if (expression.Properties.Count == 0)
+            var function = _value.Value as IFunction;
+            if (function is null)
             {
-                // empty object initializer
-                return;
+                ExceptionHelper.ThrowSyntaxError(engine.Realm);
             }
 
-            var engine = context.Engine;
-            _valueExpressions = new JintExpression[expression.Properties.Count];
-            _properties = new ObjectProperty[expression.Properties.Count];
+            _functionDefinition = new JintFunctionDefinition(function);
+            return _functionDefinition;
+        }
+    }
 
-            for (var i = 0; i < _properties.Length; i++)
+    private JintObjectExpression(ObjectExpression expression) : base(expression)
+    {
+    }
+
+    public static JintExpression Build(ObjectExpression expression)
+    {
+        return expression.Properties.Count == 0
+            ? JintEmptyObjectExpression.Instance
+            : new JintObjectExpression(expression);
+    }
+
+    private void Initialize(EvaluationContext context)
+    {
+        _canBuildFast = true;
+        var expression = (ObjectExpression) _expression;
+        ref readonly var properties = ref expression.Properties;
+
+        var valueExpressions = new Expression[properties.Count];
+        _properties = new ObjectProperty[properties.Count];
+
+        for (var i = 0; i < _properties.Length; i++)
+        {
+            string? propName = null;
+            var property = properties[i];
+            if (property is Acornima.Ast.ObjectProperty p)
             {
-                string? propName = null;
-                var property = expression.Properties[i];
-                if (property is Property p)
+                if (p.Key is Literal literal)
                 {
-                    if (p.Key is Literal literal)
-                    {
-                        propName = EsprimaExtensions.LiteralKeyToString(literal);
-                    }
-
-                    if (!p.Computed && p.Key is Identifier identifier)
-                    {
-                        propName = identifier.Name;
-                    }
-
-                    _properties[i] = new ObjectProperty(propName, p);
-
-                    if (p.Kind == PropertyKind.Init || p.Kind == PropertyKind.Data)
-                    {
-                        var propertyValue = p.Value;
-                        _valueExpressions[i] = Build(engine, propertyValue);
-                        _canBuildFast &= !propertyValue.IsFunctionDefinition();
-                    }
-                    else
-                    {
-                        _canBuildFast = false;
-                    }
+                    propName = AstExtensions.LiteralKeyToString(literal);
                 }
-                else if (property is SpreadElement spreadElement)
+
+                if (!p.Computed && p.Key is Identifier identifier)
                 {
-                    _canBuildFast = false;
-                    _properties[i] = null;
-                    _valueExpressions[i] = Build(engine, spreadElement.Argument);
+                    propName = identifier.Name;
+                    _canBuildFast &= !string.Equals(propName, "__proto__", StringComparison.Ordinal);
+                }
+
+                _properties[i] = new ObjectProperty(propName, p);
+
+                if (p.Kind is PropertyKind.Init)
+                {
+                    var propertyValue = p.Value;
+                    valueExpressions[i] = (Expression) propertyValue;
+                    _canBuildFast &= !propertyValue.IsFunctionDefinition();
                 }
                 else
                 {
-                    ExceptionHelper.ThrowArgumentOutOfRangeException("property", "cannot handle property " + property);
+                    _canBuildFast = false;
+                }
+            }
+            else if (property is SpreadElement spreadElement)
+            {
+                _canBuildFast = false;
+                _properties[i] = null;
+                valueExpressions[i] = spreadElement.Argument;
+            }
+            else
+            {
+                ExceptionHelper.ThrowArgumentOutOfRangeException("property", "cannot handle property " + property);
+            }
+
+            _canBuildFast &= propName != null;
+        }
+
+        _valueExpressions.Initialize(context, valueExpressions.AsSpan());
+    }
+
+    protected override object EvaluateInternal(EvaluationContext context)
+    {
+        if (!_initialized)
+        {
+            Initialize(context);
+            _initialized = true;
+        }
+
+        return _canBuildFast
+            ? BuildObjectFast(context)
+            : BuildObjectNormal(context);
+    }
+
+    /// <summary>
+    /// Version that can safely build plain object with only normal init/data fields fast.
+    /// </summary>
+    private JsObject BuildObjectFast(EvaluationContext context)
+    {
+        var obj = new JsObject(context.Engine);
+        var properties = new PropertyDictionary(_properties.Length, checkExistingKeys: true);
+        for (var i = 0; i < _properties.Length; i++)
+        {
+            var objectProperty = _properties[i];
+            var propValue = _valueExpressions.GetValue(context, i);
+            properties[objectProperty!._key!] = new PropertyDescriptor(propValue, PropertyFlag.ConfigurableEnumerableWritable);
+        }
+
+        obj.SetProperties(properties);
+        return obj;
+    }
+
+    /// <summary>
+    /// https://tc39.es/ecma262/#sec-object-initializer-runtime-semantics-propertydefinitionevaluation
+    /// </summary>
+    private object BuildObjectNormal(EvaluationContext context)
+    {
+        var engine = context.Engine;
+        var obj = engine.Realm.Intrinsics.Object.Construct(_properties.Length);
+
+        for (var i = 0; i < _properties.Length; i++)
+        {
+            var objectProperty = _properties[i];
+
+            if (objectProperty is null)
+            {
+                // spread
+                if (_valueExpressions.GetValue(context, i) is ObjectInstance source)
+                {
+                    source.CopyDataProperties(obj, excludedItems: null);
                 }
 
-                _canBuildFast &= propName != null;
-            }
-        }
-
-        protected override ExpressionResult EvaluateInternal(EvaluationContext context)
-        {
-            return _canBuildFast
-                ? BuildObjectFast(context)
-                : BuildObjectNormal(context);
-        }
-
-        /// <summary>
-        /// Version that can safely build plain object with only normal init/data fields fast.
-        /// </summary>
-        private ExpressionResult BuildObjectFast(EvaluationContext context)
-        {
-            var obj = context.Engine.Realm.Intrinsics.Object.Construct(0);
-            if (_properties.Length == 0)
-            {
-                return NormalCompletion(obj);
+                continue;
             }
 
-            var properties = new PropertyDictionary(_properties.Length, checkExistingKeys: true);
-            for (var i = 0; i < _properties.Length; i++)
+            var property = objectProperty._value;
+
+            if (property.Method)
             {
-                var objectProperty = _properties[i];
-                var valueExpression = _valueExpressions[i];
-                var propValue = valueExpression.GetValue(context).Value!.Clone();
-                properties[objectProperty!._key] = new PropertyDescriptor(propValue, PropertyFlag.ConfigurableEnumerableWritable);
+                ClassDefinition.MethodDefinitionEvaluation(engine, obj, property, enumerable: true);
+                continue;
             }
 
-            obj.SetProperties(properties);
-            return NormalCompletion(obj);
-        }
-
-        /// <summary>
-        /// https://tc39.es/ecma262/#sec-object-initializer-runtime-semantics-propertydefinitionevaluation
-        /// </summary>
-        private ExpressionResult BuildObjectNormal(EvaluationContext context)
-        {
-            var engine = context.Engine;
-            var obj = engine.Realm.Intrinsics.Object.Construct(_properties.Length);
-
-            for (var i = 0; i < _properties.Length; i++)
+            JsValue? propName = objectProperty.KeyJsString;
+            if (propName is null)
             {
-                var objectProperty = _properties[i];
-
-                if (objectProperty is null)
+                var value = property.TryGetKey(engine);
+                if (context.IsAbrupt())
                 {
-                    // spread
-                    if (_valueExpressions[i].GetValue(context).Value is ObjectInstance source)
-                    {
-                        source.CopyDataProperties(obj, null);
-                    }
+                    return value;
+                }
 
+                propName = TypeConverter.ToPropertyKey(value);
+            }
+
+            if (property.Kind == PropertyKind.Init)
+            {
+                var propValue = _valueExpressions.GetValue(context, i)!;
+                if (string.Equals(objectProperty._key, "__proto__", StringComparison.Ordinal) && !objectProperty._value.Computed && !objectProperty._value.Shorthand)
+                {
+                    if (propValue.IsObject() || propValue.IsNull())
+                    {
+                        obj.SetPrototypeOf(propValue);
+                    }
                     continue;
                 }
 
-                var property = objectProperty._value;
-
-                if (property.Method)
+                if (_valueExpressions.IsAnonymousFunctionDefinition(i))
                 {
-                    var methodDef = property.DefineMethod(obj);
-                    methodDef.Closure.SetFunctionName(methodDef.Key);
-                    var desc = new PropertyDescriptor(methodDef.Closure, PropertyFlag.ConfigurableEnumerableWritable);
-                    obj.DefinePropertyOrThrow(methodDef.Key, desc);
-                    continue;
+                    var closure = (Function) propValue;
+                    closure.SetFunctionName(propName);
                 }
 
-                JsValue? propName = objectProperty.KeyJsString;
-                if (propName is null)
-                {
-                    propName = TypeConverter.ToPropertyKey(property.GetKey(engine));
-                }
-
-                if (property.Kind == PropertyKind.Init || property.Kind == PropertyKind.Data)
-                {
-                    var expr = _valueExpressions[i];
-                    var completion = expr.GetValue(context);
-                    if (completion.IsAbrupt())
-                    {
-                        return completion;
-                    }
-
-                    var propValue = completion.Value!.Clone();
-                    if (expr._expression.IsFunctionDefinition())
-                    {
-                        var closure = (FunctionInstance) propValue;
-                        closure.SetFunctionName(propName);
-                    }
-
-                    var propDesc = new PropertyDescriptor(propValue, PropertyFlag.ConfigurableEnumerableWritable);
-                    obj.DefinePropertyOrThrow(propName, propDesc);
-                }
-                else if (property.Kind == PropertyKind.Get || property.Kind == PropertyKind.Set)
-                {
-                    var function = objectProperty.GetFunctionDefinition(engine);
-                    var closure = new ScriptFunctionInstance(
-                        engine,
-                        function,
-                        engine.ExecutionContext.LexicalEnvironment,
-                        function.ThisMode);
-
-                    closure.SetFunctionName(propName, property.Kind == PropertyKind.Get ? "get" : "set");
-                    closure.MakeMethod(obj);
-
-                    var propDesc = new GetSetPropertyDescriptor(
-                        get: property.Kind == PropertyKind.Get ? closure : null,
-                        set: property.Kind == PropertyKind.Set ? closure : null,
-                        PropertyFlag.Enumerable | PropertyFlag.Configurable);
-
-                    obj.DefinePropertyOrThrow(propName, propDesc);
-                }
+                obj.CreateDataPropertyOrThrow(propName, propValue);
             }
+            else if (property.Kind is PropertyKind.Get or PropertyKind.Set)
+            {
+                var function = objectProperty.GetFunctionDefinition(engine);
+                var closure = engine.Realm.Intrinsics.Function.OrdinaryFunctionCreate(
+                    engine.Realm.Intrinsics.Function.PrototypeObject,
+                    function,
+                    function.ThisMode,
+                    engine.ExecutionContext.LexicalEnvironment,
+                    engine.ExecutionContext.PrivateEnvironment);
 
-            return NormalCompletion(obj);
+                closure.SetFunctionName(propName, property.Kind == PropertyKind.Get ? "get" : "set");
+                closure.MakeMethod(obj);
+
+                var propDesc = new GetSetPropertyDescriptor(
+                    get: property.Kind == PropertyKind.Get ? closure : null,
+                    set: property.Kind == PropertyKind.Set ? closure : null,
+                    PropertyFlag.Enumerable | PropertyFlag.Configurable);
+
+                obj.DefinePropertyOrThrow(propName, propDesc);
+            }
+        }
+
+        return obj;
+    }
+
+    internal sealed class JintEmptyObjectExpression : JintExpression
+    {
+        public static JintEmptyObjectExpression Instance = new(new ObjectExpression(NodeList.From(Array.Empty<Node>())));
+
+        private JintEmptyObjectExpression(Expression expression) : base(expression)
+        {
+        }
+
+        protected override object EvaluateInternal(EvaluationContext context)
+        {
+            return new JsObject(context.Engine);
+        }
+
+        public override JsValue GetValue(EvaluationContext context)
+        {
+            return new JsObject(context.Engine);
         }
     }
 }

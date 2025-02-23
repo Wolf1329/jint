@@ -1,8 +1,9 @@
-﻿using System.Numerics;
+using System.Globalization;
+using System.Numerics;
+using System.Text;
 using Jint.Collections;
 using Jint.Native.Object;
 using Jint.Native.Symbol;
-using Jint.Pooling;
 using Jint.Runtime;
 using Jint.Runtime.Descriptors;
 using Jint.Runtime.Interop;
@@ -12,20 +13,17 @@ namespace Jint.Native.BigInt;
 /// <summary>
 /// https://tc39.es/ecma262/#sec-properties-of-the-bigint-prototype-object
 /// </summary>
-public sealed class BigIntPrototype : ObjectInstance
+internal sealed class BigIntPrototype : Prototype
 {
-    private readonly Realm _realm;
     private readonly BigIntConstructor _constructor;
 
     internal BigIntPrototype(
         Engine engine,
-        Realm realm,
         BigIntConstructor constructor,
         ObjectPrototype objectPrototype)
-        : base(engine, ObjectClass.Object, InternalTypes.BigInt)
+        : base(engine, engine.Realm)
     {
         _prototype = objectPrototype;
-        _realm = realm;
         _constructor = constructor;
     }
 
@@ -34,9 +32,9 @@ public sealed class BigIntPrototype : ObjectInstance
         var properties = new PropertyDictionary(4, checkExistingKeys: false)
         {
             ["constructor"] = new(_constructor, true, false, true),
-            ["toString"] = new(new ClrFunctionInstance(Engine, "toString", ToBigIntString, 0, PropertyFlag.Configurable), true, false, true),
-            ["toLocaleString"] = new(new ClrFunctionInstance(Engine, "toLocaleString", ToLocaleString, 0, PropertyFlag.Configurable), true, false, true),
-            ["valueOf"] = new(new ClrFunctionInstance(Engine, "valueOf", ValueOf, 0, PropertyFlag.Configurable), true, false, true),
+            ["toString"] = new(new ClrFunction(Engine, "toString", ToBigIntString, 0, PropertyFlag.Configurable), true, false, true),
+            ["toLocaleString"] = new(new ClrFunction(Engine, "toLocaleString", ToLocaleString, 0, PropertyFlag.Configurable), true, false, true),
+            ["valueOf"] = new(new ClrFunction(Engine, "valueOf", ValueOf, 0, PropertyFlag.Configurable), true, false, true),
         };
         SetProperties(properties);
 
@@ -48,32 +46,32 @@ public sealed class BigIntPrototype : ObjectInstance
     }
 
     /// <summary>
-    /// https://tc39.es/ecma262/#sec-bigint.prototype.tolocalestring
+    /// https://tc39.es/ecma402/#sup-bigint.prototype.tolocalestring
     /// </summary>
-    private JsValue ToLocaleString(JsValue thisObject, JsValue[] arguments)
+    private JsValue ToLocaleString(JsValue thisObject, JsCallArguments arguments)
     {
-        if (!thisObject.IsBigInt() && thisObject is not BigIntInstance)
-        {
-            ExceptionHelper.ThrowTypeError(_realm);
-        }
+        var locales = arguments.At(0);
+        var options = arguments.At(1);
 
-        var m = TypeConverter.ToBigInt(thisObject);
-        return m.ToString("R");
+        var x = ThisBigIntValue(thisObject);
+        //var numberFormat = (NumberFormat) Construct(_realm.Intrinsics.NumberFormat, new[] {  locales, options });
+        // numberFormat.FormatNumeric(x);
+        return x._value.ToString("R", CultureInfo.InvariantCulture);
     }
 
     /// <summary>
     /// https://tc39.es/ecma262/#sec-bigint.prototype.valueof
     /// </summary>
-    private JsValue ValueOf(JsValue thisObj, JsValue[] arguments)
+    private JsValue ValueOf(JsValue thisObject, JsCallArguments arguments)
     {
-        if (thisObj is BigIntInstance ni)
+        if (thisObject is BigIntInstance ni)
         {
             return ni.BigIntData;
         }
 
-        if (thisObj is JsBigInt)
+        if (thisObject is JsBigInt)
         {
-            return thisObj;
+            return thisObject;
         }
 
         ExceptionHelper.ThrowTypeError(_realm);
@@ -83,7 +81,7 @@ public sealed class BigIntPrototype : ObjectInstance
     /// <summary>
     /// https://tc39.es/ecma262/#sec-bigint.prototype.tostring
     /// </summary>
-    private JsValue ToBigIntString(JsValue thisObject, JsValue[] arguments)
+    private JsValue ToBigIntString(JsValue thisObject, JsCallArguments arguments)
     {
         var x = ThisBigIntValue(thisObject);
 
@@ -106,7 +104,7 @@ public sealed class BigIntPrototype : ObjectInstance
 
         if (radixMV == 10)
         {
-            return value.ToString("R");
+            return value.ToString("R", CultureInfo.InvariantCulture);
         }
 
         var negative = value < 0;
@@ -116,22 +114,24 @@ public sealed class BigIntPrototype : ObjectInstance
             value = -value;
         }
 
-        const string digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+        const string Digits = "0123456789abcdefghijklmnopqrstuvwxyz";
 
-        using var builder = StringBuilderPool.Rent();
-        var sb = builder.Builder;
+        var sb = new ValueStringBuilder(stackalloc char[64]);
 
         for (; value > 0; value /= radixMV)
         {
             var d = (int) (value % radixMV);
-            sb.Append(digits[d]);
+            sb.Append(Digits[d]);
         }
 
-        var charArray = new char[sb.Length];
-        sb.CopyTo(0, charArray, 0, charArray.Length);
-        System.Array.Reverse(charArray);
+        if (negative)
+        {
+            sb.Append('-');
+        }
 
-        return (negative ? "-" : "") + new string(charArray);
+        sb.Reverse();
+
+        return sb.ToString();
     }
 
     /// <summary>
@@ -147,7 +147,7 @@ public sealed class BigIntPrototype : ObjectInstance
                 return bigIntInstance.BigIntData;
             default:
                 ExceptionHelper.ThrowTypeError(_realm);
-                return JsBigInt.One;
+                return default;
         }
     }
 }

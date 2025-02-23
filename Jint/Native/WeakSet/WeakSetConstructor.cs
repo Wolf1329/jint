@@ -1,79 +1,86 @@
-﻿using Jint.Native.Function;
+using Jint.Native.Function;
 using Jint.Native.Object;
 using Jint.Runtime;
 using Jint.Runtime.Descriptors;
 
-namespace Jint.Native.WeakSet
+namespace Jint.Native.WeakSet;
+
+internal sealed class WeakSetConstructor : Constructor
 {
-    public sealed class WeakSetConstructor : FunctionInstance, IConstructor
+    private static readonly JsString _functionName = new("WeakSet");
+
+    internal WeakSetConstructor(
+        Engine engine,
+        Realm realm,
+        FunctionPrototype functionPrototype,
+        ObjectPrototype objectPrototype)
+        : base(engine, realm, _functionName)
     {
-        private static readonly JsString _functionName = new JsString("WeakSet");
+        _prototype = functionPrototype;
+        PrototypeObject = new WeakSetPrototype(engine, realm, this, objectPrototype);
+        _length = new PropertyDescriptor(0, PropertyFlag.Configurable);
+        _prototypeDescriptor = new PropertyDescriptor(PrototypeObject, PropertyFlag.AllForbidden);
+    }
 
-        internal WeakSetConstructor(
-            Engine engine,
-            Realm realm,
-            FunctionPrototype functionPrototype,
-            ObjectPrototype objectPrototype)
-            : base(engine, realm, _functionName)
+    private WeakSetPrototype PrototypeObject { get; }
+
+    public override ObjectInstance Construct(JsCallArguments arguments, JsValue newTarget)
+    {
+        if (newTarget.IsUndefined())
         {
-            _prototype = functionPrototype;
-            PrototypeObject = new WeakSetPrototype(engine, realm, this, objectPrototype);
-            _length = new PropertyDescriptor(0, PropertyFlag.Configurable);
-            _prototypeDescriptor = new PropertyDescriptor(PrototypeObject, PropertyFlag.AllForbidden);
+            ExceptionHelper.ThrowTypeError(_realm);
         }
 
-        public WeakSetPrototype PrototypeObject { get; }
+        var set = OrdinaryCreateFromConstructor(
+            newTarget,
+            static intrinsics => intrinsics.WeakSet.PrototypeObject,
+            static (Engine engine, Realm _, object? _) => new JsWeakSet(engine));
 
-        public override JsValue Call(JsValue thisObject, JsValue[] arguments)
+        var arg1 = arguments.At(0);
+        if (!arg1.IsNullOrUndefined())
         {
-            ExceptionHelper.ThrowTypeError(_realm, "Constructor WeakSet requires 'new'");
-            return null;
-        }
+            var adder = set.Get("add") as ICallable;
 
-        ObjectInstance IConstructor.Construct(JsValue[] arguments, JsValue newTarget)
-        {
-            if (newTarget.IsUndefined())
+            // check fast path
+            if (arg1 is JsArray array && ReferenceEquals(adder, _engine.Realm.Intrinsics.WeakSet.PrototypeObject._originalAddFunction))
             {
-                ExceptionHelper.ThrowTypeError(_realm);
-            }
-
-            var set = OrdinaryCreateFromConstructor(
-                newTarget,
-                static intrinsics => intrinsics.WeakSet.PrototypeObject,
-                static (engine, realm, _) => new WeakSetInstance(engine));
-            if (arguments.Length > 0 && !arguments[0].IsNullOrUndefined())
-            {
-                var adder = set.Get("add") as ICallable;
-                if (adder is null)
+                foreach (var value in array)
                 {
-                    ExceptionHelper.ThrowTypeError(_realm, "add must be callable");
+                    set.WeakSetAdd(value);
                 }
 
-                var iterable = arguments.At(0).GetIterator(_realm);
+                return set;
+            }
 
-                try
+            if (adder is null)
+            {
+                ExceptionHelper.ThrowTypeError(_realm, "add must be callable");
+            }
+
+            var iterable = arguments.At(0).GetIterator(_realm);
+
+            try
+            {
+                var args = new JsValue[1];
+                do
                 {
-                    var args = new JsValue[1];
-                    do
+                    if (!iterable.TryIteratorStep(out var next))
                     {
-                        if (!iterable.TryIteratorStep(out var next))
-                        {
-                            return set;
-                        }
+                        return set;
+                    }
 
-                        next.TryGetValue(CommonProperties.Value, out var nextValue);
-                        args[0] = nextValue;
-                        adder.Call(set, args);
-                    } while (true);
-                }
-                catch
-                {
-                    iterable.Close(CompletionType.Throw);
-                    throw;
-                }
+                    var nextValue = next.Get(CommonProperties.Value);
+                    args[0] = nextValue;
+                    adder.Call(set, args);
+                } while (true);
             }
-
-            return set;
+            catch
+            {
+                iterable.Close(CompletionType.Throw);
+                throw;
+            }
         }
+
+        return set;
     }
 }

@@ -1,8 +1,3 @@
-﻿#nullable enable
-
-using System;
-using System.Collections.Generic;
-
 namespace Jint.Runtime.Debugger;
 
 /// <summary>
@@ -16,7 +11,7 @@ internal sealed class OptionalSourceBreakLocationEqualityComparer : IEqualityCom
 {
     public bool Equals(BreakLocation? x, BreakLocation? y)
     {
-        if (Object.ReferenceEquals(x, y))
+        if (ReferenceEquals(x, y))
         {
             return true;
         }
@@ -29,7 +24,7 @@ internal sealed class OptionalSourceBreakLocationEqualityComparer : IEqualityCom
         return
             x.Line == y.Line &&
             x.Column == y.Column &&
-            (x.Source == null || y.Source == null || x.Source == y.Source);
+            (x.Source == null || y.Source == null || string.Equals(x.Source, y.Source, StringComparison.Ordinal));
     }
 
     public int GetHashCode(BreakLocation? obj)

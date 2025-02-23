@@ -1,5 +1,3 @@
-﻿#nullable enable
-
 namespace Jint.Runtime.Debugger;
 
 /// <summary>
@@ -20,7 +18,7 @@ public sealed record BreakLocation
 
     }
 
-    public BreakLocation(string source, Esprima.Position position) : this(source, position.Line, position.Column)
+    public BreakLocation(string? source, Position position) : this(source, position.Line, position.Column)
     {
     }
 

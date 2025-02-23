@@ -1,896 +1,777 @@
-using System;
-using System.Collections.Generic;
+using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
-using Esprima;
-using Esprima.Ast;
-using Jint.Native.Object;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Text;
 using Jint.Runtime;
 
-namespace Jint.Native.Json
+namespace Jint.Native.Json;
+
+public sealed class JsonParser
 {
-    public class JsonParser
+    private readonly Engine _engine;
+    private readonly int _maxDepth;
+
+    /// <summary>
+    /// Creates a new parser using the recursion depth specified in <see cref="Options.JsonOptions.MaxParseDepth"/>.
+    /// </summary>
+    public JsonParser(Engine engine)
+        : this(engine, engine.Options.Json.MaxParseDepth)
     {
-        private readonly Engine _engine;
+    }
 
-        public JsonParser(Engine engine)
+    public JsonParser(Engine engine, int maxDepth)
+    {
+        if (maxDepth < 0)
         {
-            _engine = engine;
+            throw new ArgumentOutOfRangeException(nameof(maxDepth), $"Max depth must be greater or equal to zero");
         }
-
-        private Extra _extra;
-
-        private int _index; // position in the stream
-        private int _length; // length of the stream
-        private int _lineNumber;
-        private int _lineStart;
-        private Location _location;
-        private Token _lookahead;
-        private string _source;
-
-        private State _state;
-
-        private static bool IsDecimalDigit(char ch)
+        _maxDepth = maxDepth;
+        _engine = engine;
+        // Two tokens are "live" during parsing,
+        // lookahead and the current one on the stack
+        // To add a safety boundary to not overwrite
+        // "still in use" stuff, the buffer contains 5
+        // instead of 2 tokens.
+        _tokenBuffer = new Token[5];
+        for (int i = 0; i < _tokenBuffer.Length; i++)
         {
-            return (ch >= '0' && ch <= '9');
+            _tokenBuffer[i] = new Token();
         }
+        _tokenBufferIndex = 0;
+    }
 
-        private static bool IsHexDigit(char ch)
+    private int _index; // position in the stream
+    private int _length; // length of the stream
+    private Token _lookahead = null!;
+    private string _source = null!;
+    private readonly Token[] _tokenBuffer;
+    private int _tokenBufferIndex;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsDecimalDigit(char ch)
+    {
+        // * For characters, which are before the '0', the equation will be negative and then wrap
+        //   around because of the unsigned short cast
+        // * For characters, which are after the '9', the equation will be positive, but >  9
+        // * For digits, the equation will be between int(0) and int(9)
+        return ((uint) (ch - '0')) <= 9;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsLowerCaseHexAlpha(char ch)
+    {
+        return ((uint) (ch - 'a')) <= 5;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsUpperCaseHexAlpha(char ch)
+    {
+        return ((uint) (ch - 'A')) <= 5;
+    }
+
+    private static bool IsHexDigit(char ch)
+    {
+        return
+            IsDecimalDigit(ch) ||
+            IsLowerCaseHexAlpha(ch) ||
+            IsUpperCaseHexAlpha(ch)
+            ;
+    }
+
+    private static bool IsWhiteSpace(char ch)
+    {
+        return (ch == ' ') ||
+               (ch == '\t') ||
+               (ch == '\n') ||
+               (ch == '\r');
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsLineTerminator(char ch)
+    {
+        return (ch == 10) || (ch == 13) || (ch == 0x2028) || (ch == 0x2029);
+    }
+
+    private char ScanHexEscape()
+    {
+        int code = char.MinValue;
+
+        for (int i = 0; i < 4; ++i)
         {
-            return
-                ch >= '0' && ch <= '9' ||
-                ch >= 'a' && ch <= 'f' ||
-                ch >= 'A' && ch <= 'F'
-                ;
-        }
-
-        private static bool IsOctalDigit(char ch)
-        {
-            return ch >= '0' && ch <= '7';
-        }
-
-        private static bool IsWhiteSpace(char ch)
-        {
-            return (ch == ' ')  ||
-                   (ch == '\t') ||
-                   (ch == '\n') ||
-                   (ch == '\r');
-        }
-
-        private static bool IsLineTerminator(char ch)
-        {
-            return (ch == 10) || (ch == 13) || (ch == 0x2028) || (ch == 0x2029);
-        }
-
-        private static bool IsNullChar(char ch)
-        {
-            return ch == 'n'
-                || ch == 'u'
-                || ch == 'l'
-                || ch == 'l'
-                ;
-        }
-
-        private static bool IsTrueOrFalseChar(char ch)
-        {
-            return ch == 't'
-                || ch == 'f'
-                || ch == 'r'
-                || ch == 'a'
-                || ch == 'u'
-                || ch == 'l'
-                || ch == 'e'
-                || ch == 's'
-                ;
-        }
-
-        private char ScanHexEscape(char prefix)
-        {
-            int code = char.MinValue;
-
-            int len = (prefix == 'u') ? 4 : 2;
-            for (int i = 0; i < len; ++i)
+            if (_index < _length + 1 && IsHexDigit(_source[_index]))
             {
-                if (_index < _length && IsHexDigit(_source.CharCodeAt(_index)))
-                {
-                    char ch = _source.CharCodeAt(_index++);
-                    code = code * 16 + "0123456789abcdef".IndexOf(ch.ToString(), StringComparison.OrdinalIgnoreCase);
-                }
-                else
-                {
-                    ThrowError(_index, Messages.ExpectedHexadecimalDigit);
-                }
+                char ch = char.ToLower(_source[_index++], CultureInfo.InvariantCulture);
+                code = code * 16 + "0123456789abcdef".IndexOf(ch);
             }
-            return (char)code;
-        }
-
-        private void SkipWhiteSpace()
-        {
-            while (_index < _length)
+            else
             {
-                char ch = _source.CharCodeAt(_index);
-
-                if (IsWhiteSpace(ch))
-                {
-                    ++_index;
-                }
-                else
-                {
-                    break;
-                }
+                ThrowError(_index, Messages.ExpectedHexadecimalDigit);
             }
         }
+        return (char) code;
+    }
 
-        private Token ScanPunctuator()
+    private char ReadToNextSignificantCharacter()
+    {
+        char result = _index < _length ? _source[_index] : char.MinValue;
+        while (IsWhiteSpace(result))
         {
-            int start = _index;
-            char code = _source.CharCodeAt(_index);
-
-            switch ((int) code)
+            if ((++_index) >= _length)
             {
-                    // Check for most common single-character punctuators.
-                case 46: // . dot
-                case 40: // ( open bracket
-                case 41: // ) close bracket
-                case 59: // ; semicolon
-                case 44: // , comma
-                case 123: // { open curly brace
-                case 125: // } close curly brace
-                case 91: // [
-                case 93: // ]
-                case 58: // :
-                case 63: // ?
-                case 126: // ~
-                    ++_index;
-
-                    string value = TypeConverter.ToString(code);
-                    return new Token
-                    {
-                        Type = Tokens.Punctuator,
-                        Text = value,
-                        Value = value,
-                        LineNumber = _lineNumber,
-                        LineStart = _lineStart,
-                        Range = new[] { start, _index }
-                    };
+                return char.MinValue;
             }
+            result = _source[_index];
+        }
+        return result;
+    }
 
-            ThrowError(start, Messages.UnexpectedToken, code);
-            return null;
+    private Token CreateToken(Tokens type, string text, char firstCharacter, JsValue value, in TextRange range)
+    {
+        Token result = _tokenBuffer[_tokenBufferIndex++];
+        if (_tokenBufferIndex >= _tokenBuffer.Length)
+        {
+            _tokenBufferIndex = 0;
+        }
+        result.Type = type;
+        result.Text = text;
+        result.FirstCharacter = firstCharacter;
+        result.Value = value;
+        result.Range = range;
+        return result;
+    }
+
+    private Token ScanPunctuator()
+    {
+        int start = _index;
+        char code = start < _source.Length ? _source[_index] : char.MinValue;
+
+        string value = ScanPunctuatorValue(start, code);
+        ++_index;
+        return CreateToken(Tokens.Punctuator, value, code, JsValue.Undefined, new TextRange(start, _index));
+    }
+
+    private string ScanPunctuatorValue(int start, char code)
+    {
+        switch (code)
+        {
+            case '.': return ".";
+            case ',': return ",";
+            case '{': return "{";
+            case '}': return "}";
+            case '[': return "[";
+            case ']': return "]";
+            case ':': return ":";
+            default:
+                ThrowError(start, Messages.UnexpectedToken, code);
+                return null!;
+        }
+    }
+
+    private Token ScanNumericLiteral()
+    {
+        using var sb = new ValueStringBuilder(stackalloc char[64]);
+        var start = _index;
+        var ch = _source.CharCodeAt(_index);
+        var canBeInteger = true;
+
+        // Number start with a -
+        if (ch == '-')
+        {
+            sb.Append(ch);
+            ch = _source.CharCodeAt(++_index);
         }
 
-        private Token ScanNumericLiteral()
+        if (ch != '.')
         {
-            char ch = _source.CharCodeAt(_index);
+            var firstCharacter = ch;
+            sb.Append(ch);
+            ch = _source.CharCodeAt(++_index);
 
-            int start = _index;
-            string number = "";
-
-            // Number start with a -
-            if (ch == '-')
+            // Hex number starts with '0x'.
+            // Octal number starts with '0'.
+            if (sb.Length == 1 && firstCharacter == '0')
             {
-                number += _source.CharCodeAt(_index++).ToString();
-                ch = _source.CharCodeAt(_index);
-            }
-
-            if (ch != '.')
-            {
-                number += _source.CharCodeAt(_index++).ToString();
-                ch = _source.CharCodeAt(_index);
-
-                // Hex number starts with '0x'.
-                // Octal number starts with '0'.
-                if (number == "0")
+                canBeInteger = false;
+                // decimal number starts with '0' such as '09' is illegal.
+                if (ch > 0 && IsDecimalDigit(ch))
                 {
-                    // decimal number starts with '0' such as '09' is illegal.
-                    if (ch > 0 && IsDecimalDigit(ch))
-                    {
-                        ThrowError(_index, Messages.UnexpectedToken, ch);
-                    }
-                }
-
-                while (IsDecimalDigit(_source.CharCodeAt(_index)))
-                {
-                    number += _source.CharCodeAt(_index++).ToString();
-                }
-                ch = _source.CharCodeAt(_index);
-            }
-
-            if (ch == '.')
-            {
-                number += _source.CharCodeAt(_index++).ToString();
-                while (IsDecimalDigit(_source.CharCodeAt(_index)))
-                {
-                    number += _source.CharCodeAt(_index++).ToString();
-                }
-                ch = _source.CharCodeAt(_index);
-            }
-
-            if (ch == 'e' || ch == 'E')
-            {
-                number += _source.CharCodeAt(_index++).ToString();
-
-                ch = _source.CharCodeAt(_index);
-                if (ch == '+' || ch == '-')
-                {
-                    number += _source.CharCodeAt(_index++).ToString();
-                }
-                if (IsDecimalDigit(_source.CharCodeAt(_index)))
-                {
-                    while (IsDecimalDigit(_source.CharCodeAt(_index)))
-                    {
-                        number += _source.CharCodeAt(_index++).ToString();
-                    }
-                }
-                else
-                {
-                    ThrowError(_index, Messages.UnexpectedToken, _source.CharCodeAt(_index));
+                    ThrowError(_index, Messages.UnexpectedToken, ch);
                 }
             }
 
-            return new Token
-                {
-                    Type = Tokens.Number,
-                    Text = number,
-                    Value = Double.Parse(number, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint | NumberStyles.AllowExponent, CultureInfo.InvariantCulture),
-                    LineNumber = _lineNumber,
-                    LineStart = _lineStart,
-                    Range = new[] {start, _index}
-                };
+            while (IsDecimalDigit((ch = _source.CharCodeAt(_index))))
+            {
+                sb.Append(ch);
+                _index++;
+            }
         }
 
-        private Token ScanBooleanLiteral()
+        if (ch == '.')
         {
-            int start = _index;
-            string s = "";
+            canBeInteger = false;
+            sb.Append(ch);
+            _index++;
 
-            while (IsTrueOrFalseChar(_source.CharCodeAt(_index)))
+            while (IsDecimalDigit((ch = _source.CharCodeAt(_index))))
             {
-                s += _source.CharCodeAt(_index++).ToString();
+                sb.Append(ch);
+                _index++;
             }
-
-            if (s == "true" || s == "false")
-            {
-                return new Token
-                {
-                    Type = Tokens.BooleanLiteral,
-                    Text = s,
-                    Value = s == "true",
-                    LineNumber = _lineNumber,
-                    LineStart = _lineStart,
-                    Range = new[] { start, _index }
-                };
-            }
-
-            ThrowError(start, Messages.UnexpectedToken, s);
-            return null;
         }
 
-        private Token ScanNullLiteral()
+        if (ch is 'e' or 'E')
         {
-            int start = _index;
-            string s = "";
-
-            while (IsNullChar(_source.CharCodeAt(_index)))
+            canBeInteger = false;
+            sb.Append(ch);
+            ch = _source.CharCodeAt(++_index);
+            if (ch is '+' or '-')
             {
-                s += _source.CharCodeAt(_index++).ToString();
+                sb.Append(ch);
+                ch = _source.CharCodeAt(++_index);
             }
-
-            if (s == Null.Text)
-            {
-                return new Token
-                {
-                    Type = Tokens.NullLiteral,
-                    Text = s,
-                    Value = Null.Instance,
-                    LineNumber = _lineNumber,
-                    LineStart = _lineStart,
-                    Range = new[] { start, _index }
-                };
-            }
-
-            ThrowError(start, Messages.UnexpectedToken, s);
-            return null;
-        }
-
-        private Token ScanStringLiteral()
-        {
-            var sb = new System.Text.StringBuilder();
-
-            char quote = _source.CharCodeAt(_index);
-
-            int start = _index;
-            ++_index;
-
-            while (_index < _length)
-            {
-                char ch = _source.CharCodeAt(_index++);
-
-                if (ch == quote)
-                {
-                    quote = char.MinValue;
-                    break;
-                }
-
-                if (ch <= 31)
-                {
-                    ThrowError(_index - 1, Messages.InvalidCharacter);
-                }
-
-                if (ch == '\\')
-                {
-                    ch = _source.CharCodeAt(_index++);
-
-                    if (ch > 0 || !IsLineTerminator(ch))
-                    {
-                        switch (ch)
-                        {
-                            case 'n':
-                                sb.Append('\n');
-                                break;
-                            case 'r':
-                                sb.Append('\r');
-                                break;
-                            case 't':
-                                sb.Append('\t');
-                                break;
-                            case 'u':
-                            case 'x':
-                                int restore = _index;
-                                char unescaped = ScanHexEscape(ch);
-                                if (unescaped > 0)
-                                {
-                                    sb.Append(unescaped.ToString());
-                                }
-                                else
-                                {
-                                    _index = restore;
-                                    sb.Append(ch.ToString());
-                                }
-                                break;
-                            case 'b':
-                                sb.Append("\b");
-                                break;
-                            case 'f':
-                                sb.Append("\f");
-                                break;
-                            case 'v':
-                                sb.Append("\x0B");
-                                break;
-
-                            default:
-                                if (IsOctalDigit(ch))
-                                {
-                                    int code = "01234567".IndexOf(ch);
-
-                                    if (_index < _length && IsOctalDigit(_source.CharCodeAt(_index)))
-                                    {
-                                        code = code * 8 + "01234567".IndexOf(_source.CharCodeAt(_index++));
-
-                                        // 3 digits are only allowed when string starts
-                                        // with 0, 1, 2, 3
-                                        if ("0123".IndexOf(ch) >= 0 &&
-                                            _index < _length &&
-                                            IsOctalDigit(_source.CharCodeAt(_index)))
-                                        {
-                                            code = code * 8 + "01234567".IndexOf(_source.CharCodeAt(_index++));
-                                        }
-                                    }
-                                    sb.Append(((char)code).ToString());
-                                }
-                                else
-                                {
-                                    sb.Append(ch.ToString());
-                                }
-                                break;
-                        }
-                    }
-                    else
-                    {
-                        ++_lineNumber;
-                        if (ch == '\r' && _source.CharCodeAt(_index) == '\n')
-                        {
-                            ++_index;
-                        }
-                    }
-                }
-                else if (IsLineTerminator(ch))
-                {
-                    break;
-                }
-                else
-                {
-                    sb.Append(ch.ToString());
-                }
-            }
-
-            if (quote != 0)
-            {
-                // unterminated string literal
-                ThrowError(_index, Messages.UnexpectedEOS);
-            }
-
-            string value = sb.ToString();
-            return new Token
-            {
-                    Type = Tokens.String,
-                    Text = value,
-                    Value = value,
-                    LineNumber = _lineNumber,
-                    LineStart = _lineStart,
-                    Range = new[] { start, _index }
-                };
-        }
-
-        private Token Advance()
-        {
-            SkipWhiteSpace();
-
-            if (_index >= _length)
-            {
-                return new Token
-                    {
-                        Type = Tokens.EOF,
-                        LineNumber = _lineNumber,
-                        LineStart = _lineStart,
-                        Range = new[] {_index, _index}
-                    };
-            }
-
-            char ch = _source.CharCodeAt(_index);
-
-            // Very common: ( and ) and ;
-            if (ch == 40 || ch == 41 || ch == 58)
-            {
-                return ScanPunctuator();
-            }
-
-            // String literal starts with double quote (#34).
-            // Single quote (#39) are not allowed in JSON.
-            if (ch == 34)
-            {
-                return ScanStringLiteral();
-            }
-
-            // Dot (.) char #46 can also start a floating-point number, hence the need
-            // to check the next character.
-            if (ch == 46)
-            {
-                if (IsDecimalDigit(_source.CharCodeAt(_index + 1)))
-                {
-                    return ScanNumericLiteral();
-                }
-                return ScanPunctuator();
-            }
-
-            if (ch == '-') // Negative Number
-            {
-                if (IsDecimalDigit(_source.CharCodeAt(_index + 1)))
-                {
-                    return ScanNumericLiteral();
-                }
-                return ScanPunctuator();
-            }
-
             if (IsDecimalDigit(ch))
             {
-                return ScanNumericLiteral();
-            }
-
-            if (ch == 't' || ch == 'f')
-            {
-                return ScanBooleanLiteral();
-            }
-
-            if (ch == 'n')
-            {
-                return ScanNullLiteral();
-            }
-
-            return ScanPunctuator();
-        }
-
-        private Token CollectToken()
-        {
-            var start = new Position(
-                line: _lineNumber,
-                column: _index - _lineStart);
-
-            Token token = Advance();
-
-            var end = new Position(
-                line: _lineNumber,
-                column: _index - _lineStart);
-
-            _location = new Location(start, end, _source);
-
-            if (token.Type != Tokens.EOF)
-            {
-                var range = new[] {token.Range[0], token.Range[1]};
-                string value = _source.Slice(token.Range[0], token.Range[1]);
-                _extra.Tokens.Add(new Token
-                    {
-                        Type = token.Type,
-                        Text = value,
-                        Value = value,
-                        Range = range,
-                    });
-            }
-
-            return token;
-        }
-
-        private Token Lex()
-        {
-            Token token = _lookahead;
-            _index = token.Range[1];
-            _lineNumber = token.LineNumber.HasValue ? token.LineNumber.Value : 0;
-            _lineStart = token.LineStart;
-
-            _lookahead = (_extra.Tokens != null) ? CollectToken() : Advance();
-
-            _index = token.Range[1];
-            _lineNumber = token.LineNumber.HasValue ? token.LineNumber.Value : 0;
-            _lineStart = token.LineStart;
-
-            return token;
-        }
-
-        private void Peek()
-        {
-            int pos = _index;
-            int line = _lineNumber;
-            int start = _lineStart;
-            _lookahead = (_extra.Tokens != null) ? CollectToken() : Advance();
-            _index = pos;
-            _lineNumber = line;
-            _lineStart = start;
-        }
-
-        private void MarkStart()
-        {
-            if (_extra.Loc.HasValue)
-            {
-                _state.MarkerStack.Push(_index - _lineStart);
-                _state.MarkerStack.Push(_lineNumber);
-            }
-            if (_extra.Range != null)
-            {
-                _state.MarkerStack.Push(_index);
-            }
-        }
-
-        private T MarkEnd<T>(T node) where T : Node
-        {
-            if (_extra.Range != null)
-            {
-                node.Range = new Esprima.Ast.Range(_state.MarkerStack.Pop(), _index);
-            }
-            if (_extra.Loc.HasValue)
-            {
-                node.Location = new Location(
-                    start: new Position(
-                        line: _state.MarkerStack.Pop(),
-                        column: _state.MarkerStack.Pop()),
-                    end: new Position(
-                        line: _lineNumber,
-                        column: _index - _lineStart),
-                    source: _source);
-                PostProcess(node);
-            }
-            return node;
-        }
-
-        public T MarkEndIf<T>(T node) where T : Node
-        {
-            if (node.Range != default || node.Location != default)
-            {
-                if (_extra.Loc.HasValue)
+                while (IsDecimalDigit(ch = _source.CharCodeAt(_index)))
                 {
-                    _state.MarkerStack.Pop();
-                    _state.MarkerStack.Pop();
-                }
-                if (_extra.Range != null)
-                {
-                    _state.MarkerStack.Pop();
+                    sb.Append(ch);
+                    _index++;
                 }
             }
             else
             {
-                MarkEnd(node);
-            }
-            return node;
-        }
-
-        public Node PostProcess(Node node)
-        {
-            //if (_extra.Source != null)
-            //{
-            //    node.Location.Source = _extra.Source;
-            //}
-
-            return node;
-        }
-
-        private void ThrowError(Token token, string messageFormat, params object[] arguments)
-        {
-            ThrowError(token.Range[0], messageFormat, arguments);
-        }
-
-        private void ThrowError(int position, string messageFormat, params object[] arguments)
-        {
-            string msg = System.String.Format(messageFormat, arguments);
-            ExceptionHelper.ThrowSyntaxError(_engine.Realm, $"{msg} at position {position}");
-        }
-
-        // Throw an exception because of the token.
-
-        private void ThrowUnexpected(Token token)
-        {
-            if (token.Type == Tokens.EOF)
-            {
-                ThrowError(token, Messages.UnexpectedEOS);
-            }
-
-            if (token.Type == Tokens.Number)
-            {
-                ThrowError(token, Messages.UnexpectedNumber);
-            }
-
-            if (token.Type == Tokens.String)
-            {
-                ThrowError(token, Messages.UnexpectedString);
-            }
-
-            // BooleanLiteral, NullLiteral, or Punctuator.
-            ThrowError(token, Messages.UnexpectedToken, token.Text);
-        }
-
-        // Expect the next token to match the specified punctuator.
-        // If not, an exception will be thrown.
-
-        private void Expect(string value)
-        {
-            Token token = Lex();
-            if (token.Type != Tokens.Punctuator || !value.Equals(token.Value))
-            {
-                ThrowUnexpected(token);
+                ThrowError(_index, Messages.UnexpectedToken, _source.CharCodeAt(_index));
             }
         }
 
-        // Return true if the next token matches the specified punctuator.
+        var number = sb.ToString();
 
-        private bool Match(string value)
+        JsNumber value;
+        if (canBeInteger && long.TryParse(number, NumberStyles.Integer, CultureInfo.InvariantCulture, out var longResult) && longResult != -0)
         {
-            return _lookahead.Type == Tokens.Punctuator && value.Equals(_lookahead.Value);
+            value = JsNumber.Create(longResult);
+        }
+        else
+        {
+            value = new JsNumber(double.Parse(number, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint | NumberStyles.AllowExponent, CultureInfo.InvariantCulture));
         }
 
-        private ObjectInstance ParseJsonArray()
+        return CreateToken(Tokens.Number, number, '\0', value, new TextRange(start, _index));
+    }
+
+    private Token ScanBooleanLiteral()
+    {
+        var start = _index;
+        if (ConsumeMatch("true"))
         {
-            var elements = new List<JsValue>();
+            return CreateToken(Tokens.BooleanLiteral, "true", '\t', JsBoolean.True, new TextRange(start, _index));
+        }
 
-            Expect("[");
+        if (ConsumeMatch("false"))
+        {
+            return CreateToken(Tokens.BooleanLiteral, "false", '\f', JsBoolean.False, new TextRange(start, _index));
+        }
 
-            while (!Match("]"))
+        ThrowError(start, Messages.UnexpectedTokenIllegal);
+        return null!;
+    }
+
+    private bool ConsumeMatch(string text)
+    {
+        var start = _index;
+        var length = text.Length;
+        if (start + length - 1 < _source.Length && _source.AsSpan(start, length).SequenceEqual(text.AsSpan()))
+        {
+            _index += length;
+            return true;
+        }
+
+        return false;
+    }
+
+    private Token ScanNullLiteral()
+    {
+        int start = _index;
+        if (ConsumeMatch("null"))
+        {
+            return CreateToken(Tokens.NullLiteral, "null", 'n', JsValue.Null, new TextRange(start, _index));
+        }
+
+        ThrowError(start, Messages.UnexpectedTokenIllegal);
+        return null!;
+    }
+
+    private Token ScanStringLiteral(ref State state)
+    {
+        char quote = _source[_index];
+        int start = _index;
+        ++_index;
+
+        using var sb = new ValueStringBuilder(stackalloc char[64]);
+        while (_index < _length)
+        {
+            char ch = _source[_index++];
+
+            if (ch == quote)
             {
-                if (Match(","))
+                quote = char.MinValue;
+                break;
+            }
+
+            if (ch <= 31)
+            {
+                ThrowError(_index - 1, Messages.InvalidCharacter);
+            }
+
+            if (ch == '\\')
+            {
+                ch = _source.CharCodeAt(_index++);
+
+                switch (ch)
                 {
-                    Lex();
-                    elements.Add(Null.Instance);
+                    case '"':
+                        sb.Append('"');
+                        break;
+                    case '\\':
+                        sb.Append('\\');
+                        break;
+                    case '/':
+                        sb.Append('/');
+                        break;
+                    case 'n':
+                        sb.Append('\n');
+                        break;
+                    case 'r':
+                        sb.Append('\r');
+                        break;
+                    case 't':
+                        sb.Append('\t');
+                        break;
+                    case 'u':
+                        sb.Append(ScanHexEscape());
+                        break;
+                    case 'b':
+                        sb.Append('\b');
+                        break;
+                    case 'f':
+                        sb.Append('\f');
+                        break;
+                    default:
+                        ThrowError(_index - 1, Messages.UnexpectedToken, ch);
+                        break;
+                }
+            }
+            else if (IsLineTerminator(ch))
+            {
+                break;
+            }
+            else
+            {
+                sb.Append(ch);
+            }
+        }
+
+        if (quote != 0)
+        {
+            // unterminated string literal
+            ThrowError(_index, Messages.UnexpectedEOS);
+        }
+
+        var value = sb.ToString();
+        return CreateToken(Tokens.String, value, '\"', new JsString(value), new TextRange(start, _index));
+    }
+
+    private Token Advance(ref State state)
+    {
+        char ch = ReadToNextSignificantCharacter();
+
+        if (ch == char.MinValue)
+        {
+            return CreateToken(Tokens.EOF, string.Empty, '\0', JsValue.Undefined, new TextRange(_index, _index));
+        }
+
+        // String literal starts with double quote (#34).
+        // Single quote (#39) are not allowed in JSON.
+        if (ch == '"')
+        {
+            return ScanStringLiteral(ref state);
+        }
+
+        if (ch == '-') // Negative Number
+        {
+            if (IsDecimalDigit(_source.CharCodeAt(_index + 1)))
+            {
+                return ScanNumericLiteral();
+            }
+            return ScanPunctuator();
+        }
+
+        if (IsDecimalDigit(ch))
+        {
+            return ScanNumericLiteral();
+        }
+
+        if (ch == 't' || ch == 'f')
+        {
+            return ScanBooleanLiteral();
+        }
+
+        if (ch == 'n')
+        {
+            return ScanNullLiteral();
+        }
+
+        return ScanPunctuator();
+    }
+
+    private Token Lex(ref State state)
+    {
+        Token token = _lookahead;
+        _index = token.Range.End;
+        _lookahead = Advance(ref state);
+        _index = token.Range.End;
+        return token;
+    }
+
+    private void Peek(ref State state)
+    {
+        int pos = _index;
+        _lookahead = Advance(ref state);
+        _index = pos;
+    }
+
+    [DoesNotReturn]
+    private void ThrowDepthLimitReached(Token token)
+    {
+        ThrowError(token.Range.Start, Messages.MaxDepthLevelReached);
+    }
+
+    [DoesNotReturn]
+    private void ThrowError(Token token, string messageFormat, params object[] arguments)
+    {
+        ThrowError(token.Range.Start, messageFormat, arguments);
+    }
+
+    [DoesNotReturn]
+    private void ThrowError(int position, string messageFormat, params object[] arguments)
+    {
+        var msg = string.Format(CultureInfo.InvariantCulture, messageFormat, arguments);
+        ExceptionHelper.ThrowSyntaxError(_engine.Realm, $"{msg} at position {position}");
+    }
+
+    // Throw an exception because of the token.
+
+    private void ThrowUnexpected(Token token)
+    {
+        if (token.Type == Tokens.EOF)
+        {
+            ThrowError(token, Messages.UnexpectedEOS);
+        }
+
+        if (token.Type == Tokens.Number)
+        {
+            ThrowError(token, Messages.UnexpectedNumber);
+        }
+
+        if (token.Type == Tokens.String)
+        {
+            ThrowError(token, Messages.UnexpectedString);
+        }
+
+        // BooleanLiteral, NullLiteral, or Punctuator.
+        ThrowError(token, Messages.UnexpectedToken, token.Text);
+    }
+
+    // Expect the next token to match the specified punctuator.
+    // If not, an exception will be thrown.
+    private void Expect(ref State state, char value)
+    {
+        Token token = Lex(ref state);
+        if (token.Type != Tokens.Punctuator || value != token.FirstCharacter)
+        {
+            ThrowUnexpected(token);
+        }
+    }
+
+    // Return true if the next token matches the specified punctuator.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool Match(char value)
+    {
+        return _lookahead.Type == Tokens.Punctuator && value == _lookahead.FirstCharacter;
+    }
+
+    private JsArray ParseJsonArray(ref State state)
+    {
+        if ((++state.CurrentDepth) > _maxDepth)
+        {
+            ThrowDepthLimitReached(_lookahead);
+        }
+
+        /*
+         To speed up performance, the list allocation is deferred.
+
+         First the elements are stored within an array received
+         from the .NET array pool.
+
+         If a list contains less elements that the size that array,
+         a Jint array is constructed with the values stored in that
+         array.
+
+         When the number of elements exceed the buffer size,
+         The elements-array gets created and filled with the content
+         of the array. The array will then turn into an
+         intermediate buffer which gets flushed to the list
+         when its full.
+        */
+        List<JsValue>? elements = null;
+
+        Expect(ref state, '[');
+
+        int bufferIndex = 0;
+        JsArray? result = null;
+
+        JsValue[] buffer = ArrayPool<JsValue>.Shared.Rent(16);
+        try
+        {
+            while (!Match(']'))
+            {
+                buffer[bufferIndex++] = ParseJsonValue(ref state);
+
+                if (!Match(']'))
+                {
+                    Expect(ref state, ',');
+                }
+
+                if (bufferIndex >= buffer.Length)
+                {
+                    if (elements is null)
+                    {
+                        elements = new List<JsValue>(buffer);
+                    }
+                    else
+                    {
+                        elements.AddRange(buffer);
+                    }
+                    bufferIndex = 0;
+                }
+            }
+
+            // BufferIndex = 0 has two meanings
+            // * Empty JSON array (elements will be null)
+            // * The buffer array has just been flushed (elements will NOT be null)
+            if (bufferIndex > 0)
+            {
+                if (elements is null)
+                {
+                    // No element list has been created, all values did fit into the array.
+                    // The Jint-Array can get constructed from that array.
+                    var data = new JsValue[bufferIndex];
+                    System.Array.Copy(buffer, data, length: bufferIndex);
+                    result = new JsArray(_engine, data);
                 }
                 else
                 {
-                    elements.Add(ParseJsonValue());
-
-                    if (!Match("]"))
+                    // An element list has been created. Flush the
+                    // remaining added items within the array to that list.
+                    for (var i = 0; i < bufferIndex; ++i)
                     {
-                        Expect(",");
+                        elements.Add(buffer[i]);
                     }
                 }
             }
-
-            Expect("]");
-
-            return _engine.Realm.Intrinsics.Array.ConstructFast(elements);
-        }
-
-        public ObjectInstance ParseJsonObject()
-        {
-            Expect("{");
-
-            var obj = _engine.Realm.Intrinsics.Object.Construct(Arguments.Empty);
-
-            while (!Match("}"))
+            else if (elements is null)
             {
-                Tokens type = _lookahead.Type;
-                if (type != Tokens.String)
-                {
-                    ThrowUnexpected(Lex());
-                }
-
-                var nameToken = Lex();
-                var name = nameToken.Value.ToString();
-                if (PropertyNameContainsInvalidCharacters(name))
-                {
-                    ThrowError(nameToken, Messages.InvalidCharacter);
-                }
-
-                Expect(":");
-                var value = ParseJsonValue();
-
-                obj.FastAddProperty(name, value, true, true, true);
-
-                if (!Match("}"))
-                {
-                    Expect(",");
-                }
+                // the JSON array did not have any elements
+                // aka: []
+                result = new JsArray(_engine);
             }
-
-            Expect("}");
-
-            return obj;
         }
-
-        private static bool PropertyNameContainsInvalidCharacters(string propertyName)
+        finally
         {
-            const char max = (char) 31;
-            foreach (var c in propertyName)
-            {
-                if (c != '\t' && c <= max)
-                    return true;
-            }
-            return false;
+            ArrayPool<JsValue>.Shared.Return(buffer);
         }
 
-        /// <summary>
-        /// Optimization.
-        /// By calling Lex().Value for each type, we parse the token twice.
-        /// It was already parsed by the peek() method.
-        /// _lookahead.Value already contain the value.
-        /// </summary>
-        /// <returns></returns>
-        private JsValue ParseJsonValue()
+        Expect(ref state, ']');
+        state.CurrentDepth--;
+
+        return result ?? new JsArray(_engine, elements!.ToArray());
+    }
+
+    private JsObject ParseJsonObject(ref State state)
+    {
+        if ((++state.CurrentDepth) > _maxDepth)
+        {
+            ThrowDepthLimitReached(_lookahead);
+        }
+
+        Expect(ref state, '{');
+
+        var obj = new JsObject(_engine);
+
+        while (!Match('}'))
         {
             Tokens type = _lookahead.Type;
-            MarkStart();
-
-            switch (type)
+            if (type != Tokens.String)
             {
-                case Tokens.NullLiteral:
-                    var v = Lex().Value;
-                    return Null.Instance;
-                case Tokens.BooleanLiteral:
-                    // implicit conversion operator goes through caching
-                    return (bool) Lex().Value ? JsBoolean.True : JsBoolean.False;
-                case Tokens.String:
-                    // implicit conversion operator goes through caching
-                    return new JsString((string) Lex().Value);
-                case Tokens.Number:
-                    return (double) Lex().Value;
+                ThrowUnexpected(Lex(ref state));
             }
 
-            if (Match("["))
+            var nameToken = Lex(ref state);
+            var name = nameToken.Text;
+            if (PropertyNameContainsInvalidCharacters(name))
             {
-                return ParseJsonArray();
+                ThrowError(nameToken, Messages.InvalidCharacter);
             }
 
-            if (Match("{"))
+            Expect(ref state, ':');
+            var value = ParseJsonValue(ref state);
+            obj.FastSetDataProperty(name, value);
+
+            if (!Match('}'))
             {
-                return ParseJsonObject();
+                Expect(ref state, ',');
             }
-
-            ThrowUnexpected(Lex());
-
-            // can't be reached
-            return Null.Instance;
         }
 
-        public JsValue Parse(string code)
+        Expect(ref state, '}');
+        state.CurrentDepth--;
+
+        return obj;
+    }
+
+    private static bool PropertyNameContainsInvalidCharacters(string propertyName)
+    {
+        const char max = (char) 31;
+        foreach (var c in propertyName)
         {
-            return Parse(code, null);
+            if (c != '\t' && c <= max)
+            {
+                return true;
+            }
         }
+        return false;
+    }
 
-        public JsValue Parse(string code, ParserOptions options)
+    /// <summary>
+    /// Optimization.
+    /// By calling Lex().Value for each type, we parse the token twice.
+    /// It was already parsed by the peek() method.
+    /// _lookahead.Value already contain the value.
+    /// </summary>
+    private JsValue ParseJsonValue(ref State state)
+    {
+        Tokens type = _lookahead.Type;
+        switch (type)
         {
-            _source = code;
-            _index = 0;
-            _lineNumber = 1;
-            _lineStart = 0;
-            _length = _source.Length;
-            _lookahead = null;
-            _state = new State
-            {
-                AllowIn = true,
-                LabelSet = new HashSet<string>(),
-                InFunctionBody = false,
-                InIteration = false,
-                InSwitch = false,
-                LastCommentStart = -1,
-                MarkerStack = new Stack<int>()
-            };
-
-            _extra = new Extra
+            case Tokens.NullLiteral:
+            case Tokens.BooleanLiteral:
+            case Tokens.String:
+            case Tokens.Number:
+                return Lex(ref state).Value;
+            case Tokens.Punctuator:
+                if (_lookahead.FirstCharacter == '[')
                 {
-                    Range = new int[0],
-                    Loc = 0,
-
-                };
-
-            if (options != null)
-            {
-                if (options.Tokens)
-                {
-                    _extra.Tokens = new List<Token>();
+                    return ParseJsonArray(ref state);
                 }
-
-            }
-
-            try
-            {
-                MarkStart();
-                Peek();
-                JsValue jsv = ParseJsonValue();
-
-                Peek();
-
-                if(_lookahead.Type != Tokens.EOF)
+                if (_lookahead.FirstCharacter == '{')
                 {
-                    ThrowError(_lookahead, Messages.UnexpectedToken, _lookahead.Text);
+                    return ParseJsonObject(ref state);
                 }
-                return jsv;
-            }
-            finally
-            {
-                _extra = new Extra();
-            }
+                ThrowUnexpected(Lex(ref state));
+                break;
         }
 
-        private class Extra
-        {
-            public int? Loc;
-            public int[] Range;
+        ThrowUnexpected(Lex(ref state));
+        // can't be reached
+        return JsValue.Null;
+    }
 
-            public List<Token> Tokens;
+    public JsValue Parse(string code)
+    {
+        _source = code;
+        _index = 0;
+        _length = _source.Length;
+        _lookahead = null!;
+
+        State state = new State();
+
+        Peek(ref state);
+        JsValue jsv = ParseJsonValue(ref state);
+
+        Peek(ref state);
+
+        if (_lookahead.Type != Tokens.EOF)
+        {
+            ThrowError(_lookahead, Messages.UnexpectedToken, _lookahead.Text);
+        }
+        return jsv;
+    }
+
+    [StructLayout(LayoutKind.Auto)]
+    private ref struct State
+    {
+        /// <summary>
+        /// The current recursion depth
+        /// </summary>
+        public int CurrentDepth { get; set; }
+    }
+
+    private enum Tokens
+    {
+        NullLiteral,
+        BooleanLiteral,
+        String,
+        Number,
+        Punctuator,
+        EOF,
+    };
+
+    private sealed class Token
+    {
+        public Tokens Type;
+        public char FirstCharacter;
+        public JsValue Value = JsValue.Undefined;
+        public string Text = null!;
+        public TextRange Range;
+    }
+
+    [StructLayout(LayoutKind.Auto)]
+    private readonly struct TextRange
+    {
+        public TextRange(int start, int end)
+        {
+            Start = start;
+            End = end;
         }
 
-        private enum Tokens
-        {
-            NullLiteral,
-            BooleanLiteral,
-            String,
-            Number,
-            Punctuator,
-            EOF,
-        };
+        public int Start { get; }
+        public int End { get; }
+    }
 
-        class Token
+    static class Messages
+    {
+        public const string InvalidCharacter = "Invalid character in JSON";
+        public const string ExpectedHexadecimalDigit = "Expected hexadecimal digit in JSON";
+        public const string UnexpectedToken = "Unexpected token '{0}' in JSON";
+        public const string UnexpectedTokenIllegal = "Unexpected token ILLEGAL in JSON";
+        public const string UnexpectedNumber = "Unexpected number in JSON";
+        public const string UnexpectedString = "Unexpected string in JSON";
+        public const string UnexpectedEOS = "Unexpected end of JSON input";
+        public const string MaxDepthLevelReached = "Max. depth level of JSON reached";
+    };
+}
+
+internal static class StringExtensions
+{
+    internal static char CharCodeAt(this string source, int index)
+    {
+        if (index > source.Length - 1)
         {
-            public Tokens Type;
-            public object Value;
-            public string Text;
-            public int[] Range;
-            public int? LineNumber;
-            public int LineStart;
+            // char.MinValue is used as the null value
+            return char.MinValue;
         }
 
-        static class Messages
-        {
-            public const string InvalidCharacter = "Invalid character in JSON";
-            public const string ExpectedHexadecimalDigit = "Expected hexadecimal digit in JSON";
-            public const string UnexpectedToken = "Unexpected token '{0}' in JSON";
-            public const string UnexpectedNumber = "Unexpected number in JSON";
-            public const string UnexpectedString = "Unexpected string in JSON";
-            public const string UnexpectedEOS = "Unexpected end of JSON input";
-        };
-
-        struct State
-        {
-            public int LastCommentStart;
-            public bool AllowIn;
-            public HashSet<string> LabelSet;
-            public bool InFunctionBody;
-            public bool InIteration;
-            public bool InSwitch;
-            public Stack<int> MarkerStack;
-        }
+        return source[index];
     }
 }

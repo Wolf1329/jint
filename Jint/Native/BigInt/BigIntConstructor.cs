@@ -1,4 +1,4 @@
-﻿using System.Numerics;
+using System.Numerics;
 using Jint.Collections;
 using Jint.Native.Function;
 using Jint.Native.Object;
@@ -11,7 +11,7 @@ namespace Jint.Native.BigInt;
 /// <summary>
 /// https://tc39.es/ecma262/#sec-properties-of-the-bigint-constructor
 /// </summary>
-public sealed class BigIntConstructor : FunctionInstance, IConstructor
+internal sealed class BigIntConstructor : Constructor
 {
     private static readonly JsString _functionName = new("BigInt");
 
@@ -23,7 +23,7 @@ public sealed class BigIntConstructor : FunctionInstance, IConstructor
         : base(engine, realm, _functionName)
     {
         _prototype = functionPrototype;
-        PrototypeObject = new BigIntPrototype(engine, realm, this, objectPrototype);
+        PrototypeObject = new BigIntPrototype(engine, this, objectPrototype);
         _length = new PropertyDescriptor(JsNumber.PositiveOne, PropertyFlag.Configurable);
         _prototypeDescriptor = new PropertyDescriptor(PrototypeObject, PropertyFlag.AllForbidden);
     }
@@ -32,8 +32,8 @@ public sealed class BigIntConstructor : FunctionInstance, IConstructor
     {
         var properties = new PropertyDictionary(2, checkExistingKeys: false)
         {
-            ["asIntN"] = new(new ClrFunctionInstance(Engine, "asIntN", AsIntN, 2, PropertyFlag.Configurable), true, false, true),
-            ["asUintN"] = new(new ClrFunctionInstance(Engine, "asUintN", AsUintN, 2, PropertyFlag.Configurable), true, false, true),
+            ["asIntN"] = new(new ClrFunction(Engine, "asIntN", AsIntN, 2, PropertyFlag.Configurable), true, false, true),
+            ["asUintN"] = new(new ClrFunction(Engine, "asUintN", AsUintN, 2, PropertyFlag.Configurable), true, false, true),
         };
         SetProperties(properties);
     }
@@ -41,7 +41,7 @@ public sealed class BigIntConstructor : FunctionInstance, IConstructor
     /// <summary>
     /// https://tc39.es/ecma262/#sec-bigint.asintn
     /// </summary>
-    private JsValue AsIntN(JsValue thisObj, JsValue[] arguments)
+    private JsValue AsIntN(JsValue thisObject, JsCallArguments arguments)
     {
         var bits = (int) TypeConverter.ToIndex(_realm, arguments.At(0));
         var bigint = arguments.At(1).ToBigInteger(_engine);
@@ -58,7 +58,7 @@ public sealed class BigIntConstructor : FunctionInstance, IConstructor
     /// <summary>
     /// https://tc39.es/ecma262/#sec-bigint.asuintn
     /// </summary>
-    private JsValue AsUintN(JsValue thisObj, JsValue[] arguments)
+    private JsValue AsUintN(JsValue thisObject, JsCallArguments arguments)
     {
         var bits = (int) TypeConverter.ToIndex(_realm, arguments.At(0));
         var bigint = arguments.At(1).ToBigInteger(_engine);
@@ -68,7 +68,7 @@ public sealed class BigIntConstructor : FunctionInstance, IConstructor
         return result;
     }
 
-    public override JsValue Call(JsValue thisObject, JsValue[] arguments)
+    protected internal override JsValue Call(JsValue thisObject, JsCallArguments arguments)
     {
         if (arguments.Length == 0)
         {
@@ -101,7 +101,7 @@ public sealed class BigIntConstructor : FunctionInstance, IConstructor
     /// <summary>
     /// https://tc39.es/ecma262/#sec-bigint-constructor-number-value
     /// </summary>
-    ObjectInstance IConstructor.Construct(JsValue[] arguments, JsValue newTarget)
+    public override ObjectInstance Construct(JsCallArguments arguments, JsValue newTarget)
     {
         var value = arguments.Length > 0
             ? JsBigInt.Create(arguments[0].ToBigInteger(_engine))
@@ -115,7 +115,9 @@ public sealed class BigIntConstructor : FunctionInstance, IConstructor
         var o = OrdinaryCreateFromConstructor(
             newTarget,
             static intrinsics => intrinsics.BigInt.PrototypeObject,
-            static (engine, realm, state) => new BigIntInstance(engine, (JsBigInt) state), value);
+            static (engine, realm, state) => new BigIntInstance(engine, state!),
+            value);
+
         return o;
     }
 
@@ -123,10 +125,9 @@ public sealed class BigIntConstructor : FunctionInstance, IConstructor
 
     public BigIntInstance Construct(JsBigInt value)
     {
-        var instance = new BigIntInstance(Engine)
+        var instance = new BigIntInstance(Engine, value)
         {
-            _prototype = PrototypeObject,
-            BigIntData = value
+            _prototype = PrototypeObject
         };
 
         return instance;

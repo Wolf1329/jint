@@ -1,40 +1,44 @@
-using Esprima.Ast;
 using Jint.Native;
 
-namespace Jint.Runtime.Interpreter.Expressions
+namespace Jint.Runtime.Interpreter.Expressions;
+
+internal sealed class JintLogicalAndExpression : JintExpression
 {
-    internal sealed class JintLogicalAndExpression : JintExpression
+    private JintExpression _left = null!;
+    private JintExpression _right = null!;
+    private bool _initialized;
+
+    public JintLogicalAndExpression(LogicalExpression expression) : base(expression)
     {
-        private JintExpression _left;
-        private JintExpression _right;
+    }
 
-        public JintLogicalAndExpression(BinaryExpression expression) : base(expression)
+    private void Initialize()
+    {
+        var expression = (LogicalExpression) _expression;
+        _left = Build(expression.Left);
+        _right = Build(expression.Right);
+    }
+
+    protected override object EvaluateInternal(EvaluationContext context)
+    {
+        if (!_initialized)
         {
-            _initialized = false;
+            Initialize();
+            _initialized = true;
         }
 
-        protected override void Initialize(EvaluationContext context)
+        var left = _left.GetValue(context);
+
+        if (left is JsBoolean b && !b._value)
         {
-            var expression = (BinaryExpression) _expression;
-            _left = Build(context.Engine, expression.Left);
-            _right = Build(context.Engine, expression.Right);
+            return b;
         }
 
-        protected override ExpressionResult EvaluateInternal(EvaluationContext context)
+        if (!TypeConverter.ToBoolean(left))
         {
-            var left = _left.GetValue(context).Value;
-
-            if (left is JsBoolean b && !b._value)
-            {
-                return NormalCompletion(b);
-            }
-
-            if (!TypeConverter.ToBoolean(left))
-            {
-                return NormalCompletion(left);
-            }
-
-            return _right.GetValue(context);
+            return left;
         }
+
+        return _right.GetValue(context);
     }
 }

@@ -1,77 +1,81 @@
-﻿using Jint.Collections;
+#pragma warning disable CA1859 // Use concrete types when possible for improved performance -- most of prototype methods return JsValue
+
+using Jint.Collections;
 using Jint.Native.Object;
 using Jint.Native.Symbol;
 using Jint.Runtime;
 using Jint.Runtime.Descriptors;
 using Jint.Runtime.Interop;
 
-namespace Jint.Native.WeakSet
+namespace Jint.Native.WeakSet;
+
+/// <summary>
+/// https://tc39.es/ecma262/#sec-weakset-objects
+/// </summary>
+internal sealed class WeakSetPrototype : Prototype
 {
-    /// <summary>
-    /// https://tc39.es/ecma262/#sec-weakset-objects
-    /// </summary>
-    public sealed class WeakSetPrototype : Prototype
+    private readonly WeakSetConstructor _constructor;
+    internal ClrFunction _originalAddFunction = null!;
+
+    internal WeakSetPrototype(
+        Engine engine,
+        Realm realm,
+        WeakSetConstructor constructor,
+        ObjectPrototype prototype) : base(engine, realm)
     {
-        private readonly WeakSetConstructor _constructor;
+        _prototype = prototype;
+        _constructor = constructor;
+    }
 
-        internal WeakSetPrototype(
-            Engine engine,
-            Realm realm,
-            WeakSetConstructor constructor,
-            ObjectPrototype prototype) : base(engine, realm)
+    protected override void Initialize()
+    {
+        _originalAddFunction = new ClrFunction(Engine, "add", Add, 1, PropertyFlag.Configurable);
+
+        const PropertyFlag PropertyFlags = PropertyFlag.Configurable | PropertyFlag.Writable;
+        var properties = new PropertyDictionary(5, checkExistingKeys: false)
         {
-            _prototype = prototype;
-            _constructor = constructor;
-        }
+            ["length"] = new(0, PropertyFlag.Configurable),
+            ["constructor"] = new(_constructor, PropertyFlag.NonEnumerable),
+            ["delete"] = new(new ClrFunction(Engine, "delete", Delete, 1, PropertyFlag.Configurable), PropertyFlags),
+            ["add"] = new(_originalAddFunction, PropertyFlags),
+            ["has"] = new(new ClrFunction(Engine, "has", Has, 1, PropertyFlag.Configurable), PropertyFlags),
+        };
+        SetProperties(properties);
 
-        protected override void Initialize()
+        var symbols = new SymbolDictionary(1)
         {
-            const PropertyFlag propertyFlags = PropertyFlag.Configurable | PropertyFlag.Writable;
-            var properties = new PropertyDictionary(5, checkExistingKeys: false)
-            {
-                ["length"] = new PropertyDescriptor(0, PropertyFlag.Configurable),
-                ["constructor"] = new PropertyDescriptor(_constructor, PropertyFlag.NonEnumerable),
-                ["delete"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "delete", Delete, 1, PropertyFlag.Configurable), propertyFlags),
-                ["add"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "add", Add, 1, PropertyFlag.Configurable), propertyFlags),
-                ["has"] = new PropertyDescriptor(new ClrFunctionInstance(Engine, "has", Has, 1, PropertyFlag.Configurable), propertyFlags),
-            };
-            SetProperties(properties);
+            [GlobalSymbolRegistry.ToStringTag] = new("WeakSet", false, false, true)
+        };
+        SetSymbols(symbols);
+    }
 
-            var symbols = new SymbolDictionary(1)
-            {
-                [GlobalSymbolRegistry.ToStringTag] = new PropertyDescriptor("WeakSet", false, false, true)
-            };
-            SetSymbols(symbols);
-        }
+    private JsValue Add(JsValue thisObject, JsCallArguments arguments)
+    {
+        var set = AssertWeakSetInstance(thisObject);
+        set.WeakSetAdd(arguments.At(0));
+        return thisObject;
+    }
 
-        private JsValue Add(JsValue thisObj, JsValue[] arguments)
+    private JsValue Delete(JsValue thisObject, JsCallArguments arguments)
+    {
+        var set = AssertWeakSetInstance(thisObject);
+        return set.WeakSetDelete(arguments.At(0)) ? JsBoolean.True : JsBoolean.False;
+    }
+
+    private JsValue Has(JsValue thisObject, JsCallArguments arguments)
+    {
+        var set = AssertWeakSetInstance(thisObject);
+        return set.WeakSetHas(arguments.At(0)) ? JsBoolean.True : JsBoolean.False;
+    }
+
+    private JsWeakSet AssertWeakSetInstance(JsValue thisObject)
+    {
+        if (thisObject is JsWeakSet set)
         {
-            var set = AssertWeakSetInstance(thisObj);
-            set.WeakSetAdd(arguments.At(0));
-            return thisObj;
-        }
-
-        private JsValue Delete(JsValue thisObj, JsValue[] arguments)
-        {
-            var set = AssertWeakSetInstance(thisObj);
-            return set.WeakSetDelete(arguments.At(0)) ? JsBoolean.True : JsBoolean.False;
-        }
-
-        private JsValue Has(JsValue thisObj, JsValue[] arguments)
-        {
-            var set = AssertWeakSetInstance(thisObj);
-            return set.WeakSetHas(arguments.At(0)) ? JsBoolean.True : JsBoolean.False;
-        }
-
-        private WeakSetInstance AssertWeakSetInstance(JsValue thisObj)
-        {
-            var set = thisObj as WeakSetInstance;
-            if (set is null)
-            {
-                ExceptionHelper.ThrowTypeError(_realm, "object must be a WeakSet");
-            }
-
             return set;
         }
+
+        ExceptionHelper.ThrowTypeError(_realm, "object must be a WeakSet");
+        return default;
     }
 }

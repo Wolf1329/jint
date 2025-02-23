@@ -1,63 +1,61 @@
-using Esprima.Ast;
 using Jint.Native;
 using Jint.Runtime.Interpreter.Expressions;
 
-namespace Jint.Runtime.Interpreter.Statements
+namespace Jint.Runtime.Interpreter.Statements;
+
+/// <summary>
+/// http://www.ecma-international.org/ecma-262/5.1/#sec-12.6.2
+/// </summary>
+internal sealed class JintWhileStatement : JintStatement<WhileStatement>
 {
-    /// <summary>
-    /// http://www.ecma-international.org/ecma-262/5.1/#sec-12.6.2
-    /// </summary>
-    internal sealed class JintWhileStatement : JintStatement<WhileStatement>
+    private string? _labelSetName;
+    private ProbablyBlockStatement _body;
+    private JintExpression _test = null!;
+
+    public JintWhileStatement(WhileStatement statement) : base(statement)
     {
-        private string _labelSetName;
-        private JintStatement _body;
-        private JintExpression _test;
+    }
 
-        public JintWhileStatement(WhileStatement statement) : base(statement)
-        {
-        }
+    protected override void Initialize(EvaluationContext context)
+    {
+        _labelSetName = _statement.LabelSet?.Name;
+        _body = new ProbablyBlockStatement(_statement.Body);
+        _test = JintExpression.Build(_statement.Test);
+    }
 
-        protected override void Initialize(EvaluationContext context)
+    protected override Completion ExecuteInternal(EvaluationContext context)
+    {
+        var v = JsValue.Undefined;
+        while (true)
         {
-            _labelSetName = _statement.LabelSet?.Name;
-            _body = Build(_statement.Body);
-            _test = JintExpression.Build(context.Engine, _statement.Test);
-        }
-
-        protected override Completion ExecuteInternal(EvaluationContext context)
-        {
-            var v = Undefined.Instance;
-            while (true)
+            if (context.DebugMode)
             {
-                if (context.DebugMode)
+                context.Engine.Debugger.OnStep(_test._expression);
+            }
+
+            var jsValue = _test.GetValue(context);
+            if (!TypeConverter.ToBoolean(jsValue))
+            {
+                return new Completion(CompletionType.Normal, v, _statement);
+            }
+
+            var completion = _body.Execute(context);
+
+            if (!completion.Value.IsEmpty)
+            {
+                v = completion.Value;
+            }
+
+            if (completion.Type != CompletionType.Continue || !string.Equals(context.Target, _labelSetName, StringComparison.Ordinal))
+            {
+                if (completion.Type == CompletionType.Break && (context.Target == null || string.Equals(context.Target, _labelSetName, StringComparison.Ordinal)))
                 {
-                    context.Engine.DebugHandler.OnStep(_test._expression);
+                    return new Completion(CompletionType.Normal, v, _statement);
                 }
 
-                var jsValue = _test.GetValue(context).Value;
-                if (!TypeConverter.ToBoolean(jsValue))
+                if (completion.Type != CompletionType.Normal)
                 {
-                    return new Completion(CompletionType.Normal, v, null, Location);
-                }
-
-                var completion = _body.Execute(context);
-
-                if (!ReferenceEquals(completion.Value, null))
-                {
-                    v = completion.Value;
-                }
-
-                if (completion.Type != CompletionType.Continue || completion.Target != _labelSetName)
-                {
-                    if (completion.Type == CompletionType.Break && (completion.Target == null || completion.Target == _labelSetName))
-                    {
-                        return new Completion(CompletionType.Normal, v, null, Location);
-                    }
-
-                    if (completion.Type != CompletionType.Normal)
-                    {
-                        return completion;
-                    }
+                    return completion;
                 }
             }
         }

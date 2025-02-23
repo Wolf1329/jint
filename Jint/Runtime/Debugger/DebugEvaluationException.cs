@@ -1,7 +1,3 @@
-﻿#nullable enable
-
-using System;
-
 namespace Jint.Runtime.Debugger;
 
 /// <summary>

@@ -1,7 +1,6 @@
-﻿namespace Jint.Runtime.Interop
+namespace Jint.Runtime.Interop;
+
+public interface IObjectWrapper
 {
-	public interface IObjectWrapper
-    {
-        object Target { get; }
-    }
+    object Target { get; }
 }

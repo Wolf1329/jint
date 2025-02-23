@@ -3,43 +3,58 @@ name: PR Check
 on:
 
   pull_request:
-    branches: [ main, release/2.x ]
-    paths-ignore:
-    - 'doc/**'
-    - '**.md'
+    branches: [ main, release/2.x, 3.x ]
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
 
 jobs:
 
   windows:
     runs-on: windows-latest
-    env:
-        DOTNET_NOLOGO: true
-        DOTNET_CLI_TELEMETRY_OPTOUT: 1
 
     steps:
-    - name: Checkout source code
-      uses: actions/checkout@v2
 
-    - name: Generate test cases
-      working-directory: ./Jint.Tests.Test262
-      run: dotnet tool restore && dotnet test262 generate
+    - name: Setup NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 9.0
+
+    - name: Checkout source code
+      uses: actions/checkout@v4
 
     - name: Test
-      run: dotnet test --configuration Release --logger:"console;verbosity=quiet"
+      run: dotnet test --configuration Release --logger GitHubActions
 
   linux:
     runs-on: ubuntu-latest
-    env:
-        DOTNET_NOLOGO: true
-        DOTNET_CLI_TELEMETRY_OPTOUT: 1
 
     steps:
-    - name: Checkout source code
-      uses: actions/checkout@v2
 
-    - name: Generate test cases
-      working-directory: ./Jint.Tests.Test262
-      run: dotnet tool restore && dotnet test262 generate
+    - name: Setup NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 9.0
+
+    - name: Checkout source code
+      uses: actions/checkout@v4
 
     - name: Test
-      run: dotnet test --configuration Release --logger:"console;verbosity=quiet"
+      run: dotnet test --configuration Release --logger GitHubActions
+
+  macos:
+    runs-on: macos-latest
+
+    steps:
+
+    - name: Setup NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 9.0
+
+    - name: Checkout source code
+      uses: actions/checkout@v4
+
+    - name: Test
+      run: dotnet test --configuration Release --logger GitHubActions
